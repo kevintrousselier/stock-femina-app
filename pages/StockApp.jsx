@@ -727,9 +727,12 @@ export default function StockApp() {
   const addNewItem = async () => {
     if (!newItemName.trim()) return;
     
+    // Utiliser le bon champ de quantité selon la région
+    const qtyFieldName = selectedRegion?.id === 'guadeloupe' ? 'GUADELOUPE' : 'CORSICA';
+    
     const fields = {
       Name: newItemName.trim(),
-      CORISCA: '0',
+      [qtyFieldName]: '0',
     };
 
     if (isOnline) {
@@ -788,7 +791,10 @@ export default function StockApp() {
   const confirmAdd = async () => {
     if (!newName.trim()) return;
     
-    const fields = { Name: newName.trim(), CORISCA: '0' };
+    // Utiliser le bon champ de quantité selon la région
+    const qtyFieldName = selectedRegion?.id === 'guadeloupe' ? 'GUADELOUPE' : 'CORSICA';
+    
+    const fields = { Name: newName.trim(), [qtyFieldName]: '0' };
     if (isOnline) {
       try {
         setLoading(true);
@@ -1267,14 +1273,28 @@ export default function StockApp() {
 
   // ========== UTILITAIRES CHAMPS DYNAMIQUES ==========
   
-  // Trouver le champ de quantité (CORISCA, Quantité, Stock, Qty...)
+  // Trouver le champ de quantité (CORSICA, GUADELOUPE, Quantité, Stock, Qty...)
   const findQuantityField = (fields) => {
-    const qtyFieldNames = ['CORISCA', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
+    if (!fields) return null;
+    
+    const qtyFieldNames = ['CORSICA', 'GUADELOUPE', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
+    
+    // Chercher d'abord une correspondance exacte
     for (const name of qtyFieldNames) {
-      if (fields && fields[name] !== undefined) {
+      if (fields[name] !== undefined) {
         return { name, value: parseInt(fields[name]) || 0 };
       }
     }
+    
+    // Sinon chercher case-insensitive
+    const fieldKeys = Object.keys(fields);
+    for (const name of qtyFieldNames) {
+      const found = fieldKeys.find(k => k.toLowerCase() === name.toLowerCase());
+      if (found && fields[found] !== undefined) {
+        return { name: found, value: parseInt(fields[found]) || 0 };
+      }
+    }
+    
     return null;
   };
 
@@ -1391,7 +1411,7 @@ export default function StockApp() {
   // ========== COMPOSANT CHAMP DYNAMIQUE ==========
   // Champs en LECTURE SEULE uniquement (Titre pour catégorisation, Date mise à jour auto)
   const readOnlyFields = ['Titre', 'Catégorie', 'Categorie', 'Type', 'Groupe', 'Group', 'Date'];
-  const quantityFieldNames = ['CORISCA', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
+  const quantityFieldNames = ['CORSICA', 'GUADELOUPE', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
   
   const DynamicField = ({ fieldName, fieldDef, value, recordId }) => {
     
@@ -2015,8 +2035,6 @@ export default function StockApp() {
   // Vue Détail d'un article
   if (view === 'detail' && selectedRecord) {
     const fields = selectedRecord.fields || {};
-    const qty = parseInt(fields.CORISCA) || 0;
-    const photo = fields['Pièces jointes']?.[0]?.url;
 
     // Gestionnaire de sélection de photo
     const handlePhotoSelect = async (e) => {
