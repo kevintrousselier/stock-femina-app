@@ -1735,7 +1735,7 @@ export default function StockApp() {
 
             {/* Date de mise à jour */}
             <div style={styles.updateInfo}>
-              <div>Mis à jour par : <strong>{fields['Enregistré par'] || currentUser}</strong></div>
+              <div>Mis à jour par : <strong>{fields['Enregistré par']?.name || fields['Enregistré par'] || currentUser}</strong></div>
               {fields.Date && <div>Le : {fields.Date}</div>}
             </div>
 
