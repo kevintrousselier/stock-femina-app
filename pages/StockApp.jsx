@@ -394,8 +394,6 @@ export default function StockApp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [pendingChanges, setPendingChanges] = useState([]);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [showSearch, setShowSearch] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
   const [showPhotoUpload, setShowPhotoUpload] = useState(false);
@@ -422,9 +420,16 @@ export default function StockApp() {
   const [showPhotoViewer, setShowPhotoViewer] = useState(false);
   const [tableFields, setTableFields] = useState([]); // Champs de la table courante
   
+  // States pour la recherche globale
+  const [globalSearch, setGlobalSearch] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [allRecordsCache, setAllRecordsCache] = useState({}); // Cache des records par base/table
+  
   const isOnline = useOnlineStatus();
   const fileInputRef = useRef(null);
   const wasOffline = useRef(false); // Pour détecter le passage offline → online
+  const searchTimeoutRef = useRef(null); // Pour le debounce de la recherche
 
   // Charger les données du localStorage au montage (côté client uniquement)
   useEffect(() => {
@@ -529,6 +534,16 @@ export default function StockApp() {
         setTableFields(table.fields);
       }
       Storage.save(`records_${base.id}_${table.id}`, recordsData);
+      // Ajouter au cache pour la recherche globale
+      setAllRecordsCache(prev => ({
+        ...prev,
+        [`${base.id}_${table.id}`]: { 
+          records: recordsData, 
+          base, 
+          table,
+          loadedAt: Date.now()
+        }
+      }));
     } catch (err) {
       setError('Erreur de chargement');
       const cached = Storage.load(`records_${base.id}_${table.id}`, []);
@@ -537,11 +552,140 @@ export default function StockApp() {
     setLoading(false);
   }, []);
 
+  // ========== RECHERCHE GLOBALE ==========
+  
+  // Effectuer la recherche quand le texte change
+  useEffect(() => {
+    if (!globalSearch.trim()) {
+      setSearchResults([]);
+      return;
+    }
+
+    // Debounce de 300ms
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+
+    searchTimeoutRef.current = setTimeout(() => {
+      performGlobalSearch(globalSearch.trim().toLowerCase());
+    }, 300);
+
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current);
+      }
+    };
+  }, [globalSearch]);
+
+  // Fonction de recherche
+  const performGlobalSearch = async (query) => {
+    if (!selectedRegion || query.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    setIsSearching(true);
+    const results = [];
+
+    // Chercher dans le cache existant
+    for (const key in allRecordsCache) {
+      const { records: cachedRecords, base, table } = allRecordsCache[key];
+      if (cachedRecords) {
+        const matches = cachedRecords.filter(record => {
+          const name = (record.fields?.Name || '').toLowerCase();
+          const comment = (record.fields?.Commentaire || '').toLowerCase();
+          return name.includes(query) || comment.includes(query);
+        });
+        
+        matches.forEach(record => {
+          results.push({
+            record,
+            base,
+            table,
+            matchType: 'cache'
+          });
+        });
+      }
+    }
+
+    // Si peu de résultats, charger plus de données
+    if (results.length < 5 && isOnline) {
+      for (const base of selectedRegion.bases) {
+        try {
+          // Charger les tables de cette base
+          const tablesData = await airtableAPI.fetchTables(base.id);
+          
+          for (const table of tablesData.slice(0, 3)) { // Limiter à 3 tables par base
+            const cacheKey = `${base.id}_${table.id}`;
+            
+            // Skip si déjà en cache récent (moins de 5 min)
+            if (allRecordsCache[cacheKey]?.loadedAt > Date.now() - 300000) {
+              continue;
+            }
+
+            try {
+              const recordsData = await airtableAPI.fetchRecords(base.id, table.id);
+              
+              // Ajouter au cache
+              setAllRecordsCache(prev => ({
+                ...prev,
+                [cacheKey]: { records: recordsData, base, table, loadedAt: Date.now() }
+              }));
+
+              // Chercher dans les nouveaux records
+              const matches = recordsData.filter(record => {
+                const name = (record.fields?.Name || '').toLowerCase();
+                return name.includes(query);
+              });
+
+              matches.forEach(record => {
+                // Éviter les doublons
+                if (!results.find(r => r.record.id === record.id)) {
+                  results.push({ record, base, table, matchType: 'live' });
+                }
+              });
+
+              // Si assez de résultats, arrêter
+              if (results.length >= 10) break;
+            } catch (err) {
+              console.log('Erreur chargement table:', table.name);
+            }
+          }
+          
+          if (results.length >= 10) break;
+        } catch (err) {
+          console.log('Erreur chargement base:', base.name);
+        }
+      }
+    }
+
+    setSearchResults(results.slice(0, 15)); // Limiter à 15 résultats
+    setIsSearching(false);
+  };
+
+  // Naviguer vers un résultat de recherche
+  const goToSearchResult = (result) => {
+    setSelectedBase(result.base);
+    setSelectedTable(result.table);
+    setSelectedRecord(result.record);
+    setRecords([result.record]); // Temporaire, sera rechargé
+    setGlobalSearch('');
+    setSearchResults([]);
+    setView('detail');
+    
+    // Recharger tous les records de la table
+    loadRecords(result.base, result.table);
+  };
+
   // Mettre à jour un record
   const updateRecord = async (recordId, fieldName, value) => {
-    // Juste le champ modifié
+    // Date de modification automatique
+    const now = new Date().toLocaleDateString('fr-FR');
+    
+    // Champs à mettre à jour (le champ modifié + la date)
     const fields = { 
       [fieldName]: value,
+      'Date': now, // Mise à jour automatique de la date
     };
     
     // Mettre à jour localement immédiatement
@@ -787,27 +931,19 @@ export default function StockApp() {
     } else if (view === 'categories') {
       setView('region');
       setSelectedRegion(null);
-    } else if (view === 'region') {
-      setView('user');
-      setCurrentUser(null);
-    } else if (view === 'search') {
-      setView('categories');
-      setShowSearch(false);
-      setSearchQuery('');
     }
   };
 
   const goHome = () => {
-    setView('user');
-    setCurrentUser(null);
+    setView('region');
     setSelectedRegion(null);
     setSelectedBase(null);
     setSelectedTable(null);
     setSelectedRecord(null);
     setTables([]);
     setRecords([]);
-    setShowSearch(false);
-    setSearchQuery('');
+    setGlobalSearch('');
+    setSearchResults([]);
   };
 
   const selectBase = (base) => {
@@ -861,43 +997,121 @@ export default function StockApp() {
     );
   }
 
-  // Header
+  // Header avec barre de recherche globale
   const Header = ({ title, showBackButton = true, showAdd = false, showHome = true }) => (
-    <div style={styles.header}>
-      <div style={styles.headerLeft}>
-        {showBackButton && (
-          <button style={styles.backButton} onClick={goBack}>
-            ←
-          </button>
-        )}
-        {showHome && (
-          <button style={styles.homeButton} onClick={goHome}>
-            🏠
-          </button>
-        )}
-      </div>
-      <h1 style={styles.headerTitle}>{title}</h1>
-      <div style={styles.headerRight}>
-        <button style={styles.guideButton} onClick={() => setShowGuide(true)}>
-          📖
-        </button>
-        <div style={{
-          ...styles.onlineIndicator,
-          backgroundColor: isOnline ? '#22c55e' : '#ef4444',
-        }}>
-          {isOnline ? '●' : '○'}
+    <div style={styles.headerContainer}>
+      {/* Barre de navigation */}
+      <div style={styles.header}>
+        <div style={styles.headerLeft}>
+          {showBackButton && (
+            <button style={styles.backButton} onClick={goBack}>
+              ←
+            </button>
+          )}
+          {showHome && (
+            <button style={styles.homeButton} onClick={goHome}>
+              🏠
+            </button>
+          )}
         </div>
-        {showAdd && (
-          <button style={styles.addButton} onClick={() => setShowAddForm(true)}>
-            +
+        <h1 style={styles.headerTitle}>{title}</h1>
+        <div style={styles.headerRight}>
+          <button style={styles.guideButton} onClick={() => setShowGuide(true)}>
+            📖
           </button>
-        )}
-        {!showSearch && view === 'categories' && (
-          <button style={styles.searchToggle} onClick={() => { setShowSearch(true); setView('search'); }}>
-            🔍
-          </button>
-        )}
+          <div style={{
+            ...styles.onlineIndicator,
+            backgroundColor: isOnline ? '#22c55e' : '#ef4444',
+          }}>
+            {isOnline ? '●' : '○'}
+          </div>
+          {showAdd && (
+            <button style={styles.addButton} onClick={() => setShowAddForm(true)}>
+              +
+            </button>
+          )}
+        </div>
       </div>
+      
+      {/* Barre de recherche globale */}
+      <div style={styles.globalSearchContainer}>
+        <div style={styles.globalSearchWrapper}>
+          <span style={styles.globalSearchIcon}>🔍</span>
+          <input
+            type="text"
+            placeholder="Rechercher un article..."
+            value={globalSearch}
+            onChange={(e) => setGlobalSearch(e.target.value)}
+            style={styles.globalSearchInput}
+          />
+          {globalSearch && (
+            <button 
+              style={styles.globalSearchClear}
+              onClick={() => { setGlobalSearch(''); setSearchResults([]); }}
+            >
+              ✕
+            </button>
+          )}
+          {isSearching && (
+            <span style={styles.globalSearchSpinner}>⟳</span>
+          )}
+        </div>
+      </div>
+      
+      {/* Résultats de recherche */}
+      {(searchResults.length > 0 || (globalSearch.length >= 2 && !isSearching)) && (
+        <div style={styles.searchResultsDropdown}>
+          {searchResults.length > 0 ? (
+            searchResults.map((result, idx) => {
+              const photoField = findPhotoField(result.record.fields);
+              const thumbUrl = photoField?.photos?.[0]?.thumbnails?.small?.url || photoField?.photos?.[0]?.url;
+              const qtyField = findQuantityField(result.record.fields);
+              
+              return (
+                <button
+                  key={`${result.record.id}-${idx}`}
+                  style={styles.searchResultItem}
+                  onClick={() => goToSearchResult(result)}
+                >
+                  {/* Vignette */}
+                  <div style={styles.searchResultThumb}>
+                    {thumbUrl ? (
+                      <img src={thumbUrl} alt="" style={styles.searchResultThumbImg} />
+                    ) : (
+                      <span style={styles.searchResultThumbEmpty}>📷</span>
+                    )}
+                  </div>
+                  
+                  {/* Infos */}
+                  <div style={styles.searchResultInfo}>
+                    <span style={styles.searchResultName}>
+                      {result.record.fields?.Name || 'Sans nom'}
+                    </span>
+                    <span style={styles.searchResultPath}>
+                      {result.base.name} › {result.table.name}
+                    </span>
+                  </div>
+                  
+                  {/* Quantité */}
+                  {qtyField && (
+                    <span style={{
+                      ...styles.searchResultQty,
+                      backgroundColor: qtyField.value === 0 ? '#fee2e2' : '#dcfce7',
+                      color: qtyField.value === 0 ? '#dc2626' : '#16a34a',
+                    }}>
+                      {qtyField.value}
+                    </span>
+                  )}
+                </button>
+              );
+            })
+          ) : (
+            <div style={styles.searchNoResults}>
+              Aucun résultat pour "{globalSearch}"
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 
@@ -1175,33 +1389,31 @@ export default function StockApp() {
   };
 
   // ========== COMPOSANT CHAMP DYNAMIQUE ==========
+  // Utilisateurs prédéfinis pour le champ "Enregistré par"
+  const USERS = ['Michel', 'Kevin', 'Alisson', 'Alex'];
+  
+  // Champs en LECTURE SEULE uniquement
+  const readOnlyFields = ['Titre', 'Catégorie', 'Categorie', 'Type', 'Groupe', 'Group', 'Date'];
+  const quantityFieldNames = ['CORISCA', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
+  
   const DynamicField = ({ fieldName, fieldDef, value, recordId }) => {
-    // Déterminer le type de champ
-    const fieldType = fieldDef?.type || 'singleLineText';
     
-    // Champs spéciaux à gérer différemment
-    if (fieldName === 'Enregistré par') {
-      const displayValue = value?.name || value || '-';
+    // ===== CHAMPS EN LECTURE SEULE (Titre/Catégorie et Date) =====
+    if (readOnlyFields.some(f => f.toLowerCase() === fieldName.toLowerCase())) {
+      const displayValue = typeof value === 'object' ? (value?.name || JSON.stringify(value)) : (value || '-');
+      let icon = '🏷️';
+      if (fieldName === 'Date') icon = '📅';
+      
       return (
         <div style={styles.fieldSection}>
-          <span style={styles.sectionLabel}>👤 {fieldName}</span>
+          <span style={styles.sectionLabel}>{icon} {fieldName === 'Date' ? 'Dernière modification' : fieldName}</span>
           <div style={styles.readOnlyField}>{displayValue}</div>
         </div>
       );
     }
 
-    // Date de mise à jour
-    if (fieldName === 'Date' && fieldType === 'date') {
-      return (
-        <div style={styles.fieldSection}>
-          <span style={styles.sectionLabel}>📅 {fieldName}</span>
-          <div style={styles.readOnlyField}>{value || '-'}</div>
-        </div>
-      );
-    }
-
-    // Nombre (pour quantité)
-    if (fieldType === 'number' || fieldName.toLowerCase().includes('quantit')) {
+    // ===== CHAMP QUANTITÉ (éditable avec boutons +/-) =====
+    if (quantityFieldNames.some(q => q.toLowerCase() === fieldName.toLowerCase())) {
       const numValue = parseInt(value) || 0;
       return (
         <div style={styles.quantitySection}>
@@ -1213,7 +1425,13 @@ export default function StockApp() {
             >
               −
             </button>
-            <span style={styles.qtyValue}>{numValue}</span>
+            <span style={{
+              ...styles.qtyValue,
+              backgroundColor: numValue === 0 ? '#fee2e2' : numValue < 5 ? '#fef3c7' : '#dcfce7',
+              color: numValue === 0 ? '#dc2626' : numValue < 5 ? '#92400e' : '#16a34a',
+            }}>
+              {numValue}
+            </span>
             <button
               style={styles.qtyButton}
               onClick={() => updateRecord(recordId, fieldName, String(numValue + 1))}
@@ -1225,8 +1443,33 @@ export default function StockApp() {
       );
     }
 
-    // Texte multiligne
-    if (fieldType === 'multilineText' || fieldName.toLowerCase().includes('comment') || fieldName.toLowerCase().includes('description')) {
+    // ===== CHAMP "ENREGISTRÉ PAR" (boutons utilisateurs) =====
+    if (fieldName === 'Enregistré par') {
+      const displayValue = value?.name || value || '';
+      return (
+        <div style={styles.fieldSection}>
+          <span style={styles.sectionLabel}>👤 {fieldName}</span>
+          <div style={styles.userSelectButtons}>
+            {USERS.map((user) => (
+              <button
+                key={user}
+                style={{
+                  ...styles.userSelectBtn,
+                  backgroundColor: displayValue === user ? '#E91E8C' : '#f1f5f9',
+                  color: displayValue === user ? '#fff' : '#64748b',
+                }}
+                onClick={() => updateRecord(recordId, fieldName, user)}
+              >
+                {user}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ===== CHAMP COMMENTAIRE (textarea) =====
+    if (fieldName.toLowerCase().includes('comment') || fieldName.toLowerCase().includes('description') || fieldName.toLowerCase().includes('dommage')) {
       return (
         <div style={styles.fieldSection}>
           <span style={styles.sectionLabel}>💬 {fieldName}</span>
@@ -1234,15 +1477,42 @@ export default function StockApp() {
             style={styles.textareaField}
             value={value || ''}
             onChange={(e) => updateRecord(recordId, fieldName, e.target.value)}
-            placeholder={`${fieldName}...`}
+            placeholder="Notes, remarques..."
             rows={3}
           />
         </div>
       );
     }
 
-    // Date
-    if (fieldType === 'date' || fieldName.toLowerCase().includes('date') || fieldName.toLowerCase().includes('péremption')) {
+    // ===== CHAMP ÉTAT (boutons sélection) =====
+    if (fieldName.toLowerCase() === 'état' || fieldName.toLowerCase() === 'etat') {
+      const etats = ['Bon', 'Endommagé', 'À vérifier'];
+      return (
+        <div style={styles.fieldSection}>
+          <span style={styles.sectionLabel}>🔍 {fieldName}</span>
+          <div style={styles.stateButtons}>
+            {etats.map((state) => (
+              <button
+                key={state}
+                style={{
+                  ...styles.stateButton,
+                  backgroundColor: value === state 
+                    ? (state === 'Bon' ? '#22c55e' : state === 'Endommagé' ? '#ef4444' : '#f59e0b')
+                    : '#f1f5f9',
+                  color: value === state ? '#fff' : '#64748b',
+                }}
+                onClick={() => updateRecord(recordId, fieldName, state)}
+              >
+                {state === 'Bon' ? '✓' : state === 'Endommagé' ? '✗' : '?'} {state}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ===== CHAMP PÉREMPTION / DATE (date picker) =====
+    if (fieldName.toLowerCase().includes('péremption') || fieldName.toLowerCase().includes('peremption')) {
       return (
         <div style={styles.fieldSection}>
           <span style={styles.sectionLabel}>📅 {fieldName}</span>
@@ -1256,57 +1526,48 @@ export default function StockApp() {
       );
     }
 
-    // Checkbox / Boolean
-    if (fieldType === 'checkbox') {
+    // ===== CHAMP RANGEMENT (texte) =====
+    if (fieldName.toLowerCase().includes('rangement') || fieldName.toLowerCase().includes('localisation')) {
       return (
         <div style={styles.fieldSection}>
-          <button
-            style={{
-              ...styles.checklistItem,
-              backgroundColor: value ? '#dcfce7' : '#fff',
-              borderColor: value ? '#22c55e' : '#e2e8f0',
-            }}
-            onClick={() => updateRecord(recordId, fieldName, !value)}
-          >
-            <span style={styles.checklistCheck}>{value ? '✓' : '○'}</span>
-            {fieldName}
-          </button>
+          <span style={styles.sectionLabel}>📍 {fieldName}</span>
+          <input
+            type="text"
+            style={styles.textInput}
+            value={value || ''}
+            onChange={(e) => updateRecord(recordId, fieldName, e.target.value)}
+            placeholder="Ex: Caisse nautique, Palette 3..."
+          />
         </div>
       );
     }
 
-    // Select / SingleSelect
-    if (fieldType === 'singleSelect' && fieldDef?.options?.choices) {
+    // ===== CHAMP DIMENSIONS (texte) =====
+    if (fieldName.toLowerCase().includes('dimension')) {
       return (
         <div style={styles.fieldSection}>
-          <span style={styles.sectionLabel}>📋 {fieldName}</span>
-          <div style={styles.selectButtons}>
-            {fieldDef.options.choices.map((choice) => (
-              <button
-                key={choice.name}
-                style={{
-                  ...styles.selectButton,
-                  backgroundColor: value === choice.name ? (choice.color || '#E91E8C') : '#f1f5f9',
-                  color: value === choice.name ? '#fff' : '#64748b',
-                }}
-                onClick={() => updateRecord(recordId, fieldName, choice.name)}
-              >
-                {choice.name}
-              </button>
-            ))}
-          </div>
+          <span style={styles.sectionLabel}>📐 {fieldName}</span>
+          <input
+            type="text"
+            style={styles.textInput}
+            value={value || ''}
+            onChange={(e) => updateRecord(recordId, fieldName, e.target.value)}
+            placeholder="Ex: 50x40cm, 2m, 10L..."
+          />
         </div>
       );
     }
 
-    // Texte simple (défaut)
+    // ===== TOUS LES AUTRES CHAMPS (texte éditable) =====
+    const displayValue = typeof value === 'object' ? (value?.name || '') : (value || '');
+    
     return (
       <div style={styles.fieldSection}>
         <span style={styles.sectionLabel}>📝 {fieldName}</span>
         <input
           type="text"
           style={styles.textInput}
-          value={value || ''}
+          value={displayValue}
           onChange={(e) => updateRecord(recordId, fieldName, e.target.value)}
           placeholder={`${fieldName}...`}
         />
@@ -1568,31 +1829,6 @@ export default function StockApp() {
       </div>
     </div>
   );
-
-  // Vue Recherche globale
-  if (view === 'search') {
-    return (
-      <div style={styles.container}>
-        <Header title="Recherche" />
-        <div style={styles.content}>
-          <input
-            type="text"
-            placeholder="Rechercher un article..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            style={styles.searchInput}
-            autoFocus
-          />
-          <p style={styles.searchHint}>
-            Tapez pour rechercher dans toutes les catégories
-          </p>
-        </div>
-        <UserBar pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline}  />
-        {showAddForm && <AddModal />}
-        {showGuide && <GuideModal />}
-      </div>
-    );
-  }
 
   // Vue Catégories (bases)
   if (view === 'categories') {
@@ -2178,12 +2414,132 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: '16px 20px',
+    padding: '12px 16px',
+    backgroundColor: '#fff',
+  },
+  headerContainer: {
     backgroundColor: '#fff',
     borderBottom: '1px solid #e2e8f0',
     position: 'sticky',
     top: 0,
     zIndex: 100,
+  },
+  // ========== STYLES RECHERCHE GLOBALE ==========
+  globalSearchContainer: {
+    padding: '0 16px 12px 16px',
+    backgroundColor: '#fff',
+  },
+  globalSearchWrapper: {
+    display: 'flex',
+    alignItems: 'center',
+    backgroundColor: '#f1f5f9',
+    borderRadius: '12px',
+    padding: '10px 14px',
+    gap: '10px',
+  },
+  globalSearchIcon: {
+    fontSize: '16px',
+    opacity: 0.5,
+  },
+  globalSearchInput: {
+    flex: 1,
+    border: 'none',
+    backgroundColor: 'transparent',
+    fontSize: '15px',
+    outline: 'none',
+    color: '#1e293b',
+  },
+  globalSearchClear: {
+    background: 'none',
+    border: 'none',
+    fontSize: '16px',
+    color: '#94a3b8',
+    cursor: 'pointer',
+    padding: '4px',
+  },
+  globalSearchSpinner: {
+    fontSize: '16px',
+    color: '#E91E8C',
+    animation: 'spin 1s linear infinite',
+  },
+  searchResultsDropdown: {
+    position: 'absolute',
+    top: '100%',
+    left: 0,
+    right: 0,
+    backgroundColor: '#fff',
+    borderTop: '1px solid #e2e8f0',
+    boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+    maxHeight: '60vh',
+    overflowY: 'auto',
+    zIndex: 200,
+  },
+  searchResultItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    padding: '12px 16px',
+    width: '100%',
+    backgroundColor: '#fff',
+    border: 'none',
+    borderBottom: '1px solid #f1f5f9',
+    cursor: 'pointer',
+    textAlign: 'left',
+  },
+  searchResultThumb: {
+    width: '44px',
+    height: '44px',
+    borderRadius: '8px',
+    backgroundColor: '#f1f5f9',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    flexShrink: 0,
+  },
+  searchResultThumbImg: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+  },
+  searchResultThumbEmpty: {
+    fontSize: '18px',
+    opacity: 0.4,
+  },
+  searchResultInfo: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    minWidth: 0,
+  },
+  searchResultName: {
+    fontSize: '14px',
+    fontWeight: '600',
+    color: '#1e293b',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  searchResultPath: {
+    fontSize: '12px',
+    color: '#94a3b8',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  searchResultQty: {
+    padding: '4px 10px',
+    borderRadius: '8px',
+    fontSize: '14px',
+    fontWeight: '700',
+    flexShrink: 0,
+  },
+  searchNoResults: {
+    padding: '20px',
+    textAlign: 'center',
+    color: '#94a3b8',
+    fontSize: '14px',
   },
   headerLeft: {
     display: 'flex',
@@ -2690,6 +3046,21 @@ const styles = {
     fontSize: '14px',
     fontWeight: '500',
     cursor: 'pointer',
+  },
+  // ========== STYLES SÉLECTION UTILISATEUR (ENREGISTRÉ PAR) ==========
+  userSelectButtons: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '8px',
+  },
+  userSelectBtn: {
+    padding: '10px 16px',
+    borderRadius: '10px',
+    border: 'none',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
   },
   detailName: {
     fontSize: '22px',
