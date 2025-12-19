@@ -384,7 +384,7 @@ const useOnlineStatus = () => {
 
 // Composant principal
 export default function StockApp() {
-  const [view, setView] = useState('user'); // Commence par la sélection d'utilisateur
+  const [view, setView] = useState('region'); // Démarre directement sur la sélection de région
   const [selectedRegion, setSelectedRegion] = useState(null);
   const [selectedBase, setSelectedBase] = useState(null);
   const [selectedTable, setSelectedTable] = useState(null);
@@ -393,7 +393,6 @@ export default function StockApp() {
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [currentUser, setCurrentUser] = useState(null);
   const [pendingChanges, setPendingChanges] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
@@ -430,19 +429,13 @@ export default function StockApp() {
   // Charger les données du localStorage au montage (côté client uniquement)
   useEffect(() => {
     const savedRegion = Storage.load('region', null);
-    const savedUser = Storage.load('user', null);
     const savedPending = Storage.load('pending', []);
     
-    if (savedRegion) setSelectedRegion(savedRegion);
-    if (savedUser) setCurrentUser(savedUser);
-    if (savedPending) setPendingChanges(savedPending);
-    
-    // Déterminer la vue initiale
-    if (savedUser && savedRegion) {
+    if (savedRegion) {
+      setSelectedRegion(savedRegion);
       setView('categories');
-    } else if (savedUser) {
-      setView('region');
     }
+    if (savedPending) setPendingChanges(savedPending);
     
     setIsHydrated(true);
   }, []);
@@ -451,10 +444,6 @@ export default function StockApp() {
   useEffect(() => {
     Storage.save('region', selectedRegion);
   }, [selectedRegion]);
-
-  useEffect(() => {
-    Storage.save('user', currentUser);
-  }, [currentUser]);
 
   useEffect(() => {
     Storage.save('pending', pendingChanges);
@@ -550,12 +539,9 @@ export default function StockApp() {
 
   // Mettre à jour un record
   const updateRecord = async (recordId, fieldName, value) => {
-    // Ajouter automatiquement qui a fait la MAJ et quand
-    const now = new Date().toLocaleDateString('fr-FR');
+    // Juste le champ modifié
     const fields = { 
       [fieldName]: value,
-      'Enregistré par': currentUser,
-      'Date': now,
     };
     
     // Mettre à jour localement immédiatement
@@ -841,48 +827,14 @@ export default function StockApp() {
     setView('detail');
   };
 
-  // Utilisateurs prédéfinis
-  const USERS = ['Michel', 'Kevin', 'Alisson', 'Alex'];
-
-  // Écran de sélection utilisateur (en premier)
-  if (!currentUser || view === 'user') {
+  // Écran de sélection de région (premier écran)
+  if (!selectedRegion || view === 'region') {
     return (
       <div style={styles.container}>
         <div style={styles.userSelectScreen}>
           <div style={styles.logoContainer}>
             <div style={styles.logo}>📦</div>
             <h1 style={styles.appTitle}>Stock Manager</h1>
-            <p style={styles.appSubtitle}>Gestion de stock terrain</p>
-          </div>
-          <div style={styles.userSelectContainer}>
-            <p style={styles.userSelectLabel}>Qui êtes-vous ?</p>
-            {USERS.map((user) => (
-              <button
-                key={user}
-                style={styles.userButton}
-                onClick={() => {
-                  setCurrentUser(user);
-                  setView('region');
-                }}
-              >
-                <span style={styles.userIcon}>👤</span>
-                {user}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Écran de sélection de région (après utilisateur)
-  if (!selectedRegion || view === 'region') {
-    return (
-      <div style={styles.container}>
-        <div style={styles.userSelectScreen}>
-          <div style={styles.logoContainer}>
-            <div style={styles.logo}>🗺️</div>
-            <h1 style={styles.appTitle}>Bonjour {currentUser.split(' ')[0]}</h1>
             <p style={styles.appSubtitle}>Choisissez votre stock</p>
           </div>
           <div style={styles.userSelectContainer}>
@@ -903,15 +855,6 @@ export default function StockApp() {
                 <span style={styles.regionCount}>{region.bases.length} catégories</span>
               </button>
             ))}
-            <button
-              style={styles.changeRegionLink}
-              onClick={() => {
-                setCurrentUser(null);
-                setView('user');
-              }}
-            >
-              ← Changer d'utilisateur
-            </button>
           </div>
         </div>
       </div>
@@ -1238,7 +1181,7 @@ export default function StockApp() {
     
     // Champs spéciaux à gérer différemment
     if (fieldName === 'Enregistré par') {
-      const displayValue = value?.name || value || currentUser;
+      const displayValue = value?.name || value || '-';
       return (
         <div style={styles.fieldSection}>
           <span style={styles.sectionLabel}>👤 {fieldName}</span>
@@ -1644,7 +1587,7 @@ export default function StockApp() {
             Tapez pour rechercher dans toutes les catégories
           </p>
         </div>
-        <UserBar user={currentUser} onLogout={() => setCurrentUser(null)} pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline}  />
+        <UserBar pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline}  />
         {showAddForm && <AddModal />}
         {showGuide && <GuideModal />}
       </div>
@@ -1673,7 +1616,7 @@ export default function StockApp() {
             ))}
           </div>
         </div>
-        <UserBar user={currentUser} onLogout={() => setCurrentUser(null)} pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline} isSyncing={isSyncing} />
+        <UserBar pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline} isSyncing={isSyncing} />
         {showGuide && <GuideModal />}
       </div>
     );
@@ -1702,7 +1645,7 @@ export default function StockApp() {
             ))}
           </div>
         </div>
-        <UserBar user={currentUser} onLogout={() => setCurrentUser(null)} pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline} isSyncing={isSyncing} />
+        <UserBar pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline} isSyncing={isSyncing} />
         {showGuide && <GuideModal />}
       </div>
     );
@@ -1845,7 +1788,7 @@ export default function StockApp() {
         {showAddModal && <CrudAddModal />}
         {showEditModal && <CrudEditModal />}
         {showDeleteModal && <CrudDeleteModal />}
-        <UserBar user={currentUser} onLogout={() => setCurrentUser(null)} pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline} isSyncing={isSyncing} />
+        <UserBar pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline} isSyncing={isSyncing} />
       </div>
     );
   }
@@ -2065,7 +2008,7 @@ export default function StockApp() {
           </div>
         </div>
         
-        <UserBar user={currentUser} onLogout={() => setCurrentUser(null)} pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline} isSyncing={isSyncing} />
+        <UserBar pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline} isSyncing={isSyncing} />
         <SyncNotification />
         {showGuide && <GuideModal />}
         {showPhotoUpload && <PhotoUploadModal />}
@@ -2088,12 +2031,13 @@ export default function StockApp() {
 }
 
 // Barre utilisateur
-function UserBar({ user, onLogout, pendingCount, onSync, isOnline, isSyncing }) {
+function UserBar({ pendingCount, onSync, isOnline, isSyncing }) {
   return (
     <div style={styles.userBar}>
       <div style={styles.userInfo}>
-        <span style={styles.userAvatar}>👤</span>
-        <span style={styles.userName}>{user}</span>
+        <span style={styles.statusIndicator}>
+          {isOnline ? '🟢 En ligne' : '🔴 Hors ligne'}
+        </span>
       </div>
       {pendingCount > 0 && (
         <button 
@@ -2107,9 +2051,6 @@ function UserBar({ user, onLogout, pendingCount, onSync, isOnline, isSyncing }) 
           {isSyncing ? '⟳ Sync...' : `${pendingCount} en attente`} {isOnline && !isSyncing && '↻'}
         </button>
       )}
-      <button style={styles.logoutButton} onClick={onLogout}>
-        Changer
-      </button>
     </div>
   );
 }
@@ -2576,6 +2517,7 @@ const styles = {
   // ========== STYLES CARROUSEL PHOTOS ==========
   photoSection: {
     marginBottom: '20px',
+    position: 'relative',
   },
   carouselContainer: {
     width: '100%',
@@ -3057,6 +2999,11 @@ const styles = {
     alignItems: 'center',
     gap: '8px',
   },
+  statusIndicator: {
+    fontSize: '13px',
+    fontWeight: '500',
+    color: '#475569',
+  },
   userAvatar: {
     fontSize: '20px',
   },
@@ -3232,17 +3179,19 @@ const styles = {
   // STYLES MODULE PHOTO
   // ==========================================
   photoAddButton: {
-    position: 'absolute',
-    bottom: '12px',
-    right: '12px',
-    padding: '10px 16px',
+    display: 'block',
+    width: '100%',
+    marginTop: '12px',
+    padding: '14px 20px',
     backgroundColor: '#00CED1', // Turquoise Femina
     color: '#fff',
-    borderRadius: '20px',
-    fontSize: '14px',
+    border: 'none',
+    borderRadius: '12px',
+    fontSize: '15px',
     fontWeight: '600',
     cursor: 'pointer',
-    boxShadow: '0 2px 8px rgba(0, 206, 209, 0.4)',
+    boxShadow: '0 2px 8px rgba(0, 206, 209, 0.3)',
+    textAlign: 'center',
   },
   photoModalOverlay: {
     position: 'fixed',
