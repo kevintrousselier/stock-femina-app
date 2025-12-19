@@ -92,33 +92,50 @@ const airtableAPI = {
     return data.tables || [];
   },
 
-  async fetchRecords(baseId, tableId) {
-    const res = await fetchWithCORS(`https://api.airtable.com/v0/${baseId}/${tableId}`);
+  async fetchRecords(baseId, tableIdOrName) {
+    const res = await fetchWithCORS(`https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableIdOrName)}`);
     const data = await res.json();
     return data.records || [];
   },
 
-  async updateRecord(baseId, tableId, recordId, fields) {
-    const res = await fetchWithCORS(`https://api.airtable.com/v0/${baseId}/${tableId}/${recordId}`, {
+  async updateRecord(baseId, tableIdOrName, recordId, fields) {
+    const res = await fetchWithCORS(`https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableIdOrName)}/${recordId}`, {
       method: 'PATCH',
       body: JSON.stringify({ fields }),
     });
-    return res.json();
+    const data = await res.json();
+    if (data.error) {
+      console.error('Airtable update error:', data.error);
+      throw new Error(data.error.message);
+    }
+    return data;
   },
 
-  async createRecord(baseId, tableId, fields) {
-    const res = await fetchWithCORS(`https://api.airtable.com/v0/${baseId}/${tableId}`, {
+  async createRecord(baseId, tableIdOrName, fields) {
+    console.log('Creating record:', { baseId, tableIdOrName, fields });
+    const res = await fetchWithCORS(`https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableIdOrName)}`, {
       method: 'POST',
       body: JSON.stringify({ fields }),
     });
-    return res.json();
+    const data = await res.json();
+    console.log('Create response:', data);
+    if (data.error) {
+      console.error('Airtable create error:', data.error);
+      throw new Error(data.error.message);
+    }
+    return data;
   },
 
-  async deleteRecord(baseId, tableId, recordId) {
-    const res = await fetchWithCORS(`https://api.airtable.com/v0/${baseId}/${tableId}/${recordId}`, {
+  async deleteRecord(baseId, tableIdOrName, recordId) {
+    const res = await fetchWithCORS(`https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableIdOrName)}/${recordId}`, {
       method: 'DELETE',
     });
-    return res.json();
+    const data = await res.json();
+    if (data.error) {
+      console.error('Airtable delete error:', data.error);
+      throw new Error(data.error.message);
+    }
+    return data;
   },
 };
 
@@ -401,6 +418,11 @@ export default function StockApp() {
   const [syncNotification, setSyncNotification] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
   
+  // States pour le carrousel et viewer photo
+  const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
+  const [showPhotoViewer, setShowPhotoViewer] = useState(false);
+  const [tableFields, setTableFields] = useState([]); // Champs de la table courante
+  
   const isOnline = useOnlineStatus();
   const fileInputRef = useRef(null);
   const wasOffline = useRef(false); // Pour détecter le passage offline → online
@@ -490,7 +512,7 @@ export default function StockApp() {
     }, 3000);
   };
 
-  // Charger les tables d'une base
+  // Charger les tables d'une base (avec leurs champs)
   const loadTables = useCallback(async (base) => {
     setLoading(true);
     setError(null);
@@ -513,6 +535,10 @@ export default function StockApp() {
     try {
       const recordsData = await airtableAPI.fetchRecords(base.id, table.id);
       setRecords(recordsData);
+      // Sauvegarder les champs de la table pour la fiche dynamique
+      if (table.fields) {
+        setTableFields(table.fields);
+      }
       Storage.save(`records_${base.id}_${table.id}`, recordsData);
     } catch (err) {
       setError('Erreur de chargement');
@@ -1082,6 +1108,280 @@ export default function StockApp() {
     </div>
   );
 
+  // ========== UTILITAIRES CHAMPS DYNAMIQUES ==========
+  
+  // Trouver le champ de quantité (CORISCA, Quantité, Stock, Qty...)
+  const findQuantityField = (fields) => {
+    const qtyFieldNames = ['CORISCA', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
+    for (const name of qtyFieldNames) {
+      if (fields && fields[name] !== undefined) {
+        return { name, value: parseInt(fields[name]) || 0 };
+      }
+    }
+    return null;
+  };
+
+  // Trouver le champ d'image/photo
+  const findPhotoField = (fields) => {
+    const photoFieldNames = ['Pièces jointes', 'Photos', 'Images', 'Photo', 'Image', 'Attachments'];
+    for (const name of photoFieldNames) {
+      if (fields && fields[name] && Array.isArray(fields[name]) && fields[name].length > 0) {
+        return { name, photos: fields[name] };
+      }
+    }
+    return null;
+  };
+
+  // Trouver le champ de catégorie/groupe
+  const findCategoryField = (fields) => {
+    const catFieldNames = ['Titre', 'Catégorie', 'Categorie', 'Type', 'Groupe', 'Group'];
+    for (const name of catFieldNames) {
+      if (fields && fields[name]) {
+        return { name, value: fields[name] };
+      }
+    }
+    return null;
+  };
+
+  // Champs à exclure de l'affichage dynamique
+  const excludedFields = ['id', 'createdTime', 'Name', 'Pièces jointes', 'Photos', 'Images', 
+    'photo_individuel', 'photo_reference', 'photo_angles', 'photo_range', 'photo_contexte'];
+
+  // ========== COMPOSANT PHOTO VIEWER (PLEIN ÉCRAN) ==========
+  const PhotoViewer = ({ photos, currentIndex, onClose, onPrev, onNext }) => (
+    <div style={styles.photoViewerOverlay} onClick={onClose}>
+      <div style={styles.photoViewerContent} onClick={(e) => e.stopPropagation()}>
+        <button style={styles.photoViewerClose} onClick={onClose}>✕</button>
+        
+        {photos.length > 1 && (
+          <button style={styles.photoViewerPrev} onClick={onPrev}>‹</button>
+        )}
+        
+        <img 
+          src={photos[currentIndex]?.url || photos[currentIndex]?.thumbnails?.large?.url} 
+          alt={`Photo ${currentIndex + 1}`}
+          style={styles.photoViewerImage}
+        />
+        
+        {photos.length > 1 && (
+          <button style={styles.photoViewerNext} onClick={onNext}>›</button>
+        )}
+        
+        {photos.length > 1 && (
+          <div style={styles.photoViewerCounter}>
+            {currentIndex + 1} / {photos.length}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // ========== COMPOSANT CARROUSEL PHOTOS ==========
+  const PhotoCarousel = ({ photos, onPhotoClick }) => {
+    const [activeIndex, setActiveIndex] = useState(0);
+    
+    if (!photos || photos.length === 0) {
+      return (
+        <div style={styles.photoPlaceholder}>
+          <span style={styles.cameraIcon}>📷</span>
+          <span style={styles.photoText}>Pas de photo</span>
+        </div>
+      );
+    }
+
+    return (
+      <div style={styles.carouselContainer}>
+        {/* Image principale */}
+        <div 
+          style={styles.carouselMain}
+          onClick={() => onPhotoClick(activeIndex)}
+        >
+          <img 
+            src={photos[activeIndex]?.url || photos[activeIndex]?.thumbnails?.large?.url} 
+            alt={`Photo ${activeIndex + 1}`}
+            style={styles.carouselImage}
+          />
+          {photos.length > 1 && (
+            <div style={styles.carouselBadge}>{activeIndex + 1}/{photos.length}</div>
+          )}
+        </div>
+        
+        {/* Vignettes */}
+        {photos.length > 1 && (
+          <div style={styles.carouselThumbs}>
+            {photos.map((photo, idx) => (
+              <button
+                key={idx}
+                style={{
+                  ...styles.carouselThumb,
+                  border: idx === activeIndex ? '2px solid #E91E8C' : '2px solid transparent',
+                }}
+                onClick={() => setActiveIndex(idx)}
+              >
+                <img 
+                  src={photo.thumbnails?.small?.url || photo.url} 
+                  alt={`Thumb ${idx + 1}`}
+                  style={styles.carouselThumbImg}
+                />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ========== COMPOSANT CHAMP DYNAMIQUE ==========
+  const DynamicField = ({ fieldName, fieldDef, value, recordId }) => {
+    // Déterminer le type de champ
+    const fieldType = fieldDef?.type || 'singleLineText';
+    
+    // Champs spéciaux à gérer différemment
+    if (fieldName === 'Enregistré par') {
+      const displayValue = value?.name || value || currentUser;
+      return (
+        <div style={styles.fieldSection}>
+          <span style={styles.sectionLabel}>👤 {fieldName}</span>
+          <div style={styles.readOnlyField}>{displayValue}</div>
+        </div>
+      );
+    }
+
+    // Date de mise à jour
+    if (fieldName === 'Date' && fieldType === 'date') {
+      return (
+        <div style={styles.fieldSection}>
+          <span style={styles.sectionLabel}>📅 {fieldName}</span>
+          <div style={styles.readOnlyField}>{value || '-'}</div>
+        </div>
+      );
+    }
+
+    // Nombre (pour quantité)
+    if (fieldType === 'number' || fieldName.toLowerCase().includes('quantit')) {
+      const numValue = parseInt(value) || 0;
+      return (
+        <div style={styles.quantitySection}>
+          <span style={styles.sectionLabel}>🔢 {fieldName}</span>
+          <div style={styles.quantityControls}>
+            <button
+              style={styles.qtyButton}
+              onClick={() => updateRecord(recordId, fieldName, String(Math.max(0, numValue - 1)))}
+            >
+              −
+            </button>
+            <span style={styles.qtyValue}>{numValue}</span>
+            <button
+              style={styles.qtyButton}
+              onClick={() => updateRecord(recordId, fieldName, String(numValue + 1))}
+            >
+              +
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // Texte multiligne
+    if (fieldType === 'multilineText' || fieldName.toLowerCase().includes('comment') || fieldName.toLowerCase().includes('description')) {
+      return (
+        <div style={styles.fieldSection}>
+          <span style={styles.sectionLabel}>💬 {fieldName}</span>
+          <textarea
+            style={styles.textareaField}
+            value={value || ''}
+            onChange={(e) => updateRecord(recordId, fieldName, e.target.value)}
+            placeholder={`${fieldName}...`}
+            rows={3}
+          />
+        </div>
+      );
+    }
+
+    // Date
+    if (fieldType === 'date' || fieldName.toLowerCase().includes('date') || fieldName.toLowerCase().includes('péremption')) {
+      return (
+        <div style={styles.fieldSection}>
+          <span style={styles.sectionLabel}>📅 {fieldName}</span>
+          <input
+            type="date"
+            style={styles.textInput}
+            value={value || ''}
+            onChange={(e) => updateRecord(recordId, fieldName, e.target.value)}
+          />
+        </div>
+      );
+    }
+
+    // Checkbox / Boolean
+    if (fieldType === 'checkbox') {
+      return (
+        <div style={styles.fieldSection}>
+          <button
+            style={{
+              ...styles.checklistItem,
+              backgroundColor: value ? '#dcfce7' : '#fff',
+              borderColor: value ? '#22c55e' : '#e2e8f0',
+            }}
+            onClick={() => updateRecord(recordId, fieldName, !value)}
+          >
+            <span style={styles.checklistCheck}>{value ? '✓' : '○'}</span>
+            {fieldName}
+          </button>
+        </div>
+      );
+    }
+
+    // Select / SingleSelect
+    if (fieldType === 'singleSelect' && fieldDef?.options?.choices) {
+      return (
+        <div style={styles.fieldSection}>
+          <span style={styles.sectionLabel}>📋 {fieldName}</span>
+          <div style={styles.selectButtons}>
+            {fieldDef.options.choices.map((choice) => (
+              <button
+                key={choice.name}
+                style={{
+                  ...styles.selectButton,
+                  backgroundColor: value === choice.name ? (choice.color || '#E91E8C') : '#f1f5f9',
+                  color: value === choice.name ? '#fff' : '#64748b',
+                }}
+                onClick={() => updateRecord(recordId, fieldName, choice.name)}
+              >
+                {choice.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // Texte simple (défaut)
+    return (
+      <div style={styles.fieldSection}>
+        <span style={styles.sectionLabel}>📝 {fieldName}</span>
+        <input
+          type="text"
+          style={styles.textInput}
+          value={value || ''}
+          onChange={(e) => updateRecord(recordId, fieldName, e.target.value)}
+          placeholder={`${fieldName}...`}
+        />
+      </div>
+    );
+  };
+
+  // Grouper les records par catégorie (Titre)
+  const groupedRecords = records.reduce((groups, record) => {
+    const cat = findCategoryField(record.fields);
+    const groupName = cat?.value || 'Autres';
+    if (!groups[groupName]) {
+      groups[groupName] = [];
+    }
+    groups[groupName].push(record);
+    return groups;
+  }, {});
+
   // Modal Guide des bonnes pratiques
   const GuideModal = () => (
     <div style={styles.guideOverlay} onClick={() => setShowGuide(false)}>
@@ -1408,8 +1708,12 @@ export default function StockApp() {
     );
   }
 
-  // Vue Items (articles)
+  // Vue Items (articles) - AVEC VIGNETTES ET REGROUPEMENT
   if (view === 'items' && selectedBase && selectedTable) {
+    // Vérifier si on a des catégories à afficher
+    const hasCategories = Object.keys(groupedRecords).length > 1 || 
+      (Object.keys(groupedRecords).length === 1 && !groupedRecords['Autres']);
+
     return (
       <div style={styles.container}>
         <Header title={selectedTable.name} showAdd={true} />
@@ -1421,41 +1725,120 @@ export default function StockApp() {
           {/* Barre d'action pour ajouter un article */}
           <CrudActionBar />
           
-          <div style={styles.itemList}>
-            {records.map((record) => {
-              const qty = parseInt(record.fields?.CORISCA) || 0;
-              const etat = record.fields?.Etat;
-              return (
-                <div key={record.id} style={styles.itemCardWrapper}>
-                  <button
-                    style={styles.itemCard}
-                    onClick={() => selectRecord(record)}
-                  >
-                    <div style={styles.itemInfo}>
-                      <span style={styles.itemName}>{record.fields?.Name || 'Sans nom'}</span>
-                      {record.fields?.Rangement && (
-                        <span style={styles.itemLocation}>📍 {record.fields.Rangement}</span>
-                      )}
-                      {etat === 'Endommagé' && <span style={styles.damagedTag}>⚠️ Endommagé</span>}
-                      {etat === 'À vérifier' && <span style={styles.checkTag}>❓ À vérifier</span>}
-                      {record._pending && <span style={styles.pendingTag}>En attente</span>}
-                    </div>
-                    <div style={{
-                      ...styles.quantityBadge,
-                      backgroundColor: qty === 0 ? '#fee2e2' : qty < 5 ? '#fef3c7' : '#dcfce7',
-                      color: qty === 0 ? '#dc2626' : qty < 5 ? '#92400e' : '#16a34a',
-                    }}>
-                      {qty}
-                    </div>
-                  </button>
-                  <ItemActions record={record} />
+          {/* Liste avec ou sans regroupement */}
+          {hasCategories ? (
+            // AVEC regroupement par catégorie
+            <div style={styles.itemList}>
+              {Object.entries(groupedRecords).map(([groupName, groupRecords]) => (
+                <div key={groupName} style={styles.groupSection}>
+                  <div style={styles.groupHeader}>
+                    <span style={styles.groupName}>{groupName}</span>
+                    <span style={styles.groupCount}>{groupRecords.length}</span>
+                  </div>
+                  {groupRecords.map((record) => {
+                    const qtyField = findQuantityField(record.fields);
+                    const qty = qtyField?.value || 0;
+                    const photoField = findPhotoField(record.fields);
+                    const thumbUrl = photoField?.photos?.[0]?.thumbnails?.small?.url || photoField?.photos?.[0]?.url;
+                    const etat = record.fields?.Etat;
+                    
+                    return (
+                      <div key={record.id} style={styles.itemCardWrapper}>
+                        <button
+                          style={styles.itemCardWithThumb}
+                          onClick={() => selectRecord(record)}
+                        >
+                          {/* Vignette photo */}
+                          <div style={styles.itemThumb}>
+                            {thumbUrl ? (
+                              <img src={thumbUrl} alt="" style={styles.itemThumbImg} />
+                            ) : (
+                              <span style={styles.itemThumbEmpty}>📷</span>
+                            )}
+                          </div>
+                          
+                          {/* Infos */}
+                          <div style={styles.itemInfoWithThumb}>
+                            <span style={styles.itemNameTruncate}>{record.fields?.Name || 'Sans nom'}</span>
+                            {record.fields?.Rangement && (
+                              <span style={styles.itemLocation}>📍 {record.fields.Rangement}</span>
+                            )}
+                            {etat === 'Endommagé' && <span style={styles.damagedTag}>⚠️ Endommagé</span>}
+                            {etat === 'À vérifier' && <span style={styles.checkTag}>❓ À vérifier</span>}
+                            {record._pending && <span style={styles.pendingTag}>En attente</span>}
+                          </div>
+                          
+                          {/* Badge quantité */}
+                          <div style={{
+                            ...styles.quantityBadge,
+                            backgroundColor: qty === 0 ? '#fee2e2' : qty < 5 ? '#fef3c7' : '#dcfce7',
+                            color: qty === 0 ? '#dc2626' : qty < 5 ? '#92400e' : '#16a34a',
+                          }}>
+                            {qty}
+                          </div>
+                        </button>
+                        <ItemActions record={record} />
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
-            {!loading && records.length === 0 && (
-              <p style={styles.emptyState}>Aucun article dans cette catégorie</p>
-            )}
-          </div>
+              ))}
+            </div>
+          ) : (
+            // SANS regroupement (liste simple)
+            <div style={styles.itemList}>
+              {records.map((record) => {
+                const qtyField = findQuantityField(record.fields);
+                const qty = qtyField?.value || 0;
+                const photoField = findPhotoField(record.fields);
+                const thumbUrl = photoField?.photos?.[0]?.thumbnails?.small?.url || photoField?.photos?.[0]?.url;
+                const etat = record.fields?.Etat;
+                
+                return (
+                  <div key={record.id} style={styles.itemCardWrapper}>
+                    <button
+                      style={styles.itemCardWithThumb}
+                      onClick={() => selectRecord(record)}
+                    >
+                      {/* Vignette photo */}
+                      <div style={styles.itemThumb}>
+                        {thumbUrl ? (
+                          <img src={thumbUrl} alt="" style={styles.itemThumbImg} />
+                        ) : (
+                          <span style={styles.itemThumbEmpty}>📷</span>
+                        )}
+                      </div>
+                      
+                      {/* Infos */}
+                      <div style={styles.itemInfoWithThumb}>
+                        <span style={styles.itemNameTruncate}>{record.fields?.Name || 'Sans nom'}</span>
+                        {record.fields?.Rangement && (
+                          <span style={styles.itemLocation}>📍 {record.fields.Rangement}</span>
+                        )}
+                        {etat === 'Endommagé' && <span style={styles.damagedTag}>⚠️ Endommagé</span>}
+                        {etat === 'À vérifier' && <span style={styles.checkTag}>❓ À vérifier</span>}
+                        {record._pending && <span style={styles.pendingTag}>En attente</span>}
+                      </div>
+                      
+                      {/* Badge quantité */}
+                      <div style={{
+                        ...styles.quantityBadge,
+                        backgroundColor: qty === 0 ? '#fee2e2' : qty < 5 ? '#fef3c7' : '#dcfce7',
+                        color: qty === 0 ? '#dc2626' : qty < 5 ? '#92400e' : '#16a34a',
+                      }}>
+                        {qty}
+                      </div>
+                    </button>
+                    <ItemActions record={record} />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          
+          {!loading && records.length === 0 && (
+            <p style={styles.emptyState}>Aucun article dans cette catégorie</p>
+          )}
         </div>
         {showAddForm && <AddModal />}
         {showGuide && <GuideModal />}
@@ -1558,21 +1941,55 @@ export default function StockApp() {
       setPhotoUploading(false);
     };
 
+    // Récupérer les photos
+    const photoField = findPhotoField(fields);
+    const photos = photoField?.photos || [];
+    
+    // Récupérer la quantité dynamiquement
+    const qtyField = findQuantityField(fields);
+    
+    // Trouver la définition des champs de la table
+    const getFieldDef = (fieldName) => {
+      return tableFields.find(f => f.name === fieldName) || null;
+    };
+
+    // Liste des champs à afficher (exclure les systèmes et les photos)
+    const displayFields = Object.keys(fields).filter(key => 
+      !excludedFields.includes(key) && 
+      key !== (qtyField?.name) && // Exclure le champ quantité (affiché séparément)
+      !key.startsWith('photo_') // Exclure les champs checklist photo
+    );
+
+    // Handlers pour le viewer photo
+    const openPhotoViewer = (index) => {
+      setCurrentPhotoIndex(index);
+      setShowPhotoViewer(true);
+    };
+
+    const closePhotoViewer = () => {
+      setShowPhotoViewer(false);
+    };
+
+    const prevPhoto = () => {
+      setCurrentPhotoIndex(prev => prev > 0 ? prev - 1 : photos.length - 1);
+    };
+
+    const nextPhoto = () => {
+      setCurrentPhotoIndex(prev => prev < photos.length - 1 ? prev + 1 : 0);
+    };
+
     return (
       <div style={styles.container}>
         <Header title="Détail" />
         <div style={styles.content}>
           <div style={styles.detailCard}>
-            {/* Photo avec bouton d'ajout */}
-            <div style={styles.photoContainer}>
-              {photo ? (
-                <img src={photo} alt={fields.Name} style={styles.photo} />
-              ) : (
-                <div style={styles.photoPlaceholder}>
-                  <span style={styles.cameraIcon}>📷</span>
-                  <span style={styles.photoText}>Pas de photo</span>
-                </div>
-              )}
+            
+            {/* CARROUSEL PHOTOS */}
+            <div style={styles.photoSection}>
+              <PhotoCarousel 
+                photos={photos} 
+                onPhotoClick={openPhotoViewer}
+              />
               <label style={styles.photoAddButton}>
                 <input
                   type="file"
@@ -1581,165 +1998,64 @@ export default function StockApp() {
                   onChange={handlePhotoSelect}
                   style={{ display: 'none' }}
                 />
-                {photoUploading ? '⏳' : '📸 Ajouter'}
+                {photoUploading ? '⏳ Chargement...' : '📸 Ajouter une photo'}
               </label>
             </div>
 
-            {/* Nom */}
+            {/* NOM DE L'ARTICLE */}
             <h2 style={styles.detailName}>{fields.Name || 'Sans nom'}</h2>
-            {fields.Titre && <p style={styles.detailSubtitle}>{fields.Titre}</p>}
+            
+            {/* CATÉGORIE (si existe) */}
+            {findCategoryField(fields) && (
+              <p style={styles.detailSubtitle}>
+                <span style={styles.categoryBadge}>
+                  {findCategoryField(fields).value}
+                </span>
+              </p>
+            )}
 
-            {/* Quantité */}
-            <div style={styles.quantitySection}>
-              <span style={styles.sectionLabel}>Quantité</span>
-              <div style={styles.quantityControls}>
-                <button
-                  style={styles.qtyButton}
-                  onClick={() => updateRecord(selectedRecord.id, 'CORISCA', String(Math.max(0, qty - 1)))}
-                >
-                  −
-                </button>
-                <span style={styles.qtyValue}>{qty}</span>
-                <button
-                  style={styles.qtyButton}
-                  onClick={() => updateRecord(selectedRecord.id, 'CORISCA', String(qty + 1))}
-                >
-                  +
-                </button>
-              </div>
-            </div>
-
-            {/* État du matériel */}
-            <div style={styles.fieldSection}>
-              <span style={styles.sectionLabel}>🔍 État</span>
-              <div style={styles.stateButtons}>
-                {['Bon', 'Endommagé', 'À vérifier'].map((state) => (
+            {/* QUANTITÉ (si existe) */}
+            {qtyField && (
+              <div style={styles.quantitySection}>
+                <span style={styles.sectionLabel}>🔢 {qtyField.name}</span>
+                <div style={styles.quantityControls}>
                   <button
-                    key={state}
-                    style={{
-                      ...styles.stateButton,
-                      backgroundColor: fields.Etat === state 
-                        ? (state === 'Bon' ? '#22c55e' : state === 'Endommagé' ? '#ef4444' : '#f59e0b')
-                        : '#f1f5f9',
-                      color: fields.Etat === state ? '#fff' : '#64748b',
-                    }}
-                    onClick={() => updateRecord(selectedRecord.id, 'Etat', state)}
+                    style={styles.qtyButton}
+                    onClick={() => updateRecord(selectedRecord.id, qtyField.name, String(Math.max(0, qtyField.value - 1)))}
                   >
-                    {state === 'Bon' ? '✓' : state === 'Endommagé' ? '✗' : '?'} {state}
+                    −
                   </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Description des dommages (si endommagé) */}
-            {fields.Etat === 'Endommagé' && (
-              <div style={styles.fieldSection}>
-                <span style={styles.sectionLabel}>⚠️ Description des dommages</span>
-                <textarea
-                  style={{...styles.textareaField, borderColor: '#ef4444'}}
-                  value={fields.Dommages || ''}
-                  onChange={(e) => updateRecord(selectedRecord.id, 'Dommages', e.target.value)}
-                  placeholder="Décrivez les dommages constatés..."
-                  rows={2}
-                />
+                  <span style={{
+                    ...styles.qtyValue,
+                    backgroundColor: qtyField.value === 0 ? '#fee2e2' : qtyField.value < 5 ? '#fef3c7' : '#dcfce7',
+                    color: qtyField.value === 0 ? '#dc2626' : qtyField.value < 5 ? '#92400e' : '#16a34a',
+                  }}>
+                    {qtyField.value}
+                  </span>
+                  <button
+                    style={styles.qtyButton}
+                    onClick={() => updateRecord(selectedRecord.id, qtyField.name, String(qtyField.value + 1))}
+                  >
+                    +
+                  </button>
+                </div>
               </div>
             )}
 
-            {/* Dimensions */}
-            <div style={styles.fieldSection}>
-              <span style={styles.sectionLabel}>📐 Dimensions</span>
-              <input
-                type="text"
-                style={styles.textInput}
-                value={fields.Dimensions || ''}
-                onChange={(e) => updateRecord(selectedRecord.id, 'Dimensions', e.target.value)}
-                placeholder="Ex: 50x40cm, 2m, 10L..."
-              />
+            {/* CHAMPS DYNAMIQUES */}
+            <div style={styles.dynamicFields}>
+              {displayFields.map(fieldName => (
+                <DynamicField
+                  key={fieldName}
+                  fieldName={fieldName}
+                  fieldDef={getFieldDef(fieldName)}
+                  value={fields[fieldName]}
+                  recordId={selectedRecord.id}
+                />
+              ))}
             </div>
 
-            {/* Date de péremption */}
-            <div style={styles.fieldSection}>
-              <span style={styles.sectionLabel}>📅 Date de péremption</span>
-              <input
-                type="date"
-                style={styles.textInput}
-                value={fields.Peremption || ''}
-                onChange={(e) => updateRecord(selectedRecord.id, 'Peremption', e.target.value)}
-              />
-            </div>
-
-            {/* Localisation */}
-            <div style={styles.fieldSection}>
-              <span style={styles.sectionLabel}>📍 Rangement (caisse/tiroir)</span>
-              <input
-                type="text"
-                style={styles.textInput}
-                value={fields.Rangement || ''}
-                onChange={(e) => updateRecord(selectedRecord.id, 'Rangement', e.target.value)}
-                placeholder="Ex: Caisse nautique, Palette 3..."
-              />
-            </div>
-
-            {/* Numéro d'inventaire */}
-            <div style={styles.fieldSection}>
-              <span style={styles.sectionLabel}>🏷️ Numéro d'inventaire</span>
-              <input
-                type="text"
-                style={styles.textInput}
-                value={fields.NumeroInventaire || ''}
-                onChange={(e) => updateRecord(selectedRecord.id, 'NumeroInventaire', e.target.value)}
-                placeholder="Numéro unique..."
-              />
-            </div>
-
-            {/* Commentaire */}
-            <div style={styles.fieldSection}>
-              <span style={styles.sectionLabel}>💬 Commentaire</span>
-              <textarea
-                style={styles.textareaField}
-                value={fields.Commentaire || ''}
-                onChange={(e) => updateRecord(selectedRecord.id, 'Commentaire', e.target.value)}
-                placeholder="Notes, précautions particulières..."
-                rows={3}
-              />
-            </div>
-
-            {/* Checklist Photos */}
-            <div style={styles.photoChecklist}>
-              <span style={styles.sectionLabel}>📸 Checklist Photos</span>
-              <div style={styles.checklistItems}>
-                {[
-                  { key: 'photo_individuel', label: 'Photo individuelle' },
-                  { key: 'photo_reference', label: 'Référence produit visible' },
-                  { key: 'photo_angles', label: 'Différents angles' },
-                  { key: 'photo_range', label: 'Rangé dans sa caisse' },
-                  { key: 'photo_contexte', label: 'Contexte (autres éléments caisse)' },
-                ].map((item) => (
-                  <button
-                    key={item.key}
-                    style={{
-                      ...styles.checklistItem,
-                      backgroundColor: fields[item.key] ? '#dcfce7' : '#fff',
-                      borderColor: fields[item.key] ? '#22c55e' : '#e2e8f0',
-                    }}
-                    onClick={() => updateRecord(selectedRecord.id, item.key, !fields[item.key])}
-                  >
-                    <span style={styles.checklistCheck}>
-                      {fields[item.key] ? '✓' : '○'}
-                    </span>
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Date de mise à jour */}
-            <div style={styles.updateInfo}>
-              <div>Mis à jour par : <strong>{fields['Enregistré par']?.name || fields['Enregistré par'] || currentUser}</strong></div>
-              {fields.Date && <div>Le : {fields.Date}</div>}
-            </div>
-
-            {/* Bouton supprimer */}
+            {/* BOUTON SUPPRIMER */}
             <button
               style={styles.deleteButton}
               onClick={() => deleteItem(selectedRecord.id)}
@@ -1748,10 +2064,22 @@ export default function StockApp() {
             </button>
           </div>
         </div>
+        
         <UserBar user={currentUser} onLogout={() => setCurrentUser(null)} pendingCount={pendingChanges.length} onSync={syncPendingChanges} isOnline={isOnline} isSyncing={isSyncing} />
         <SyncNotification />
         {showGuide && <GuideModal />}
         {showPhotoUpload && <PhotoUploadModal />}
+        
+        {/* VIEWER PHOTO PLEIN ÉCRAN */}
+        {showPhotoViewer && photos.length > 0 && (
+          <PhotoViewer
+            photos={photos}
+            currentIndex={currentPhotoIndex}
+            onClose={closePhotoViewer}
+            onPrev={prevPhoto}
+            onNext={nextPhoto}
+          />
+        )}
       </div>
     );
   }
@@ -2092,6 +2420,86 @@ const styles = {
     boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
     textAlign: 'left',
   },
+  // ========== STYLES POUR VIGNETTES ET LISTE AMÉLIORÉE ==========
+  itemCardWithThumb: {
+    flex: 1,
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    padding: '10px 14px',
+    backgroundColor: '#fff',
+    border: 'none',
+    borderRadius: '14px',
+    cursor: 'pointer',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+    textAlign: 'left',
+    minWidth: 0,
+  },
+  itemThumb: {
+    width: '50px',
+    height: '50px',
+    borderRadius: '10px',
+    backgroundColor: '#f1f5f9',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    overflow: 'hidden',
+  },
+  itemThumbImg: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+  },
+  itemThumbEmpty: {
+    fontSize: '20px',
+    opacity: 0.4,
+  },
+  itemInfoWithThumb: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    flex: 1,
+    minWidth: 0,
+    overflow: 'hidden',
+  },
+  itemNameTruncate: {
+    fontSize: '14px',
+    fontWeight: '600',
+    color: '#1e293b',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    display: '-webkit-box',
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: 'vertical',
+    lineHeight: '1.3',
+  },
+  // ========== STYLES POUR GROUPEMENT ==========
+  groupSection: {
+    marginBottom: '16px',
+  },
+  groupHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '10px 14px',
+    backgroundColor: '#FCE4F2',
+    borderRadius: '10px',
+    marginBottom: '8px',
+  },
+  groupName: {
+    fontSize: '14px',
+    fontWeight: '700',
+    color: '#E91E8C',
+  },
+  groupCount: {
+    fontSize: '12px',
+    fontWeight: '600',
+    color: '#fff',
+    backgroundColor: '#E91E8C',
+    padding: '2px 10px',
+    borderRadius: '12px',
+  },
   itemInfo: {
     display: 'flex',
     flexDirection: 'column',
@@ -2164,6 +2572,182 @@ const styles = {
   photoText: {
     fontSize: '14px',
     color: '#64748b',
+  },
+  // ========== STYLES CARROUSEL PHOTOS ==========
+  photoSection: {
+    marginBottom: '20px',
+  },
+  carouselContainer: {
+    width: '100%',
+  },
+  carouselMain: {
+    position: 'relative',
+    width: '100%',
+    aspectRatio: '16/10',
+    backgroundColor: '#f1f5f9',
+    borderRadius: '16px',
+    overflow: 'hidden',
+    cursor: 'pointer',
+  },
+  carouselImage: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+  },
+  carouselBadge: {
+    position: 'absolute',
+    bottom: '10px',
+    right: '10px',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    color: '#fff',
+    padding: '4px 10px',
+    borderRadius: '12px',
+    fontSize: '12px',
+    fontWeight: '600',
+  },
+  carouselThumbs: {
+    display: 'flex',
+    gap: '8px',
+    marginTop: '10px',
+    overflowX: 'auto',
+    paddingBottom: '4px',
+  },
+  carouselThumb: {
+    width: '60px',
+    height: '60px',
+    borderRadius: '8px',
+    overflow: 'hidden',
+    cursor: 'pointer',
+    backgroundColor: '#f1f5f9',
+    padding: 0,
+    flexShrink: 0,
+  },
+  carouselThumbImg: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+  },
+  // ========== STYLES VIEWER PHOTO PLEIN ÉCRAN ==========
+  photoViewerOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.95)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+  },
+  photoViewerContent: {
+    position: 'relative',
+    width: '100%',
+    height: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoViewerImage: {
+    maxWidth: '100%',
+    maxHeight: '90%',
+    objectFit: 'contain',
+  },
+  photoViewerClose: {
+    position: 'absolute',
+    top: '20px',
+    right: '20px',
+    width: '44px',
+    height: '44px',
+    borderRadius: '50%',
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    border: 'none',
+    color: '#fff',
+    fontSize: '24px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  photoViewerPrev: {
+    position: 'absolute',
+    left: '10px',
+    top: '50%',
+    transform: 'translateY(-50%)',
+    width: '50px',
+    height: '50px',
+    borderRadius: '50%',
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    border: 'none',
+    color: '#fff',
+    fontSize: '32px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoViewerNext: {
+    position: 'absolute',
+    right: '10px',
+    top: '50%',
+    transform: 'translateY(-50%)',
+    width: '50px',
+    height: '50px',
+    borderRadius: '50%',
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    border: 'none',
+    color: '#fff',
+    fontSize: '32px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoViewerCounter: {
+    position: 'absolute',
+    bottom: '30px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    color: '#fff',
+    fontSize: '16px',
+    fontWeight: '600',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    padding: '6px 16px',
+    borderRadius: '20px',
+  },
+  // ========== STYLES CHAMPS DYNAMIQUES ==========
+  dynamicFields: {
+    marginTop: '20px',
+  },
+  categoryBadge: {
+    display: 'inline-block',
+    backgroundColor: '#E91E8C',
+    color: '#fff',
+    padding: '4px 12px',
+    borderRadius: '12px',
+    fontSize: '13px',
+    fontWeight: '600',
+  },
+  readOnlyField: {
+    padding: '12px 16px',
+    backgroundColor: '#f8fafc',
+    borderRadius: '10px',
+    fontSize: '15px',
+    color: '#475569',
+  },
+  selectButtons: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '8px',
+  },
+  selectButton: {
+    padding: '10px 16px',
+    borderRadius: '10px',
+    border: 'none',
+    fontSize: '14px',
+    fontWeight: '500',
+    cursor: 'pointer',
   },
   detailName: {
     fontSize: '22px',
