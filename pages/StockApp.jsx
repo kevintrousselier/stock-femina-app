@@ -426,6 +426,11 @@ export default function StockApp() {
   const [isSearching, setIsSearching] = useState(false);
   const [allRecordsCache, setAllRecordsCache] = useState({}); // Cache des records par base/table
   
+  // States pour le préchargement des données
+  const [isPreloading, setIsPreloading] = useState(false);
+  const [preloadProgress, setPreloadProgress] = useState({ current: 0, total: 0, status: '' });
+  const [lastPreloadDate, setLastPreloadDate] = useState(null);
+  
   const isOnline = useOnlineStatus();
   const fileInputRef = useRef(null);
   const wasOffline = useRef(false); // Pour détecter le passage offline → online
@@ -435,12 +440,14 @@ export default function StockApp() {
   useEffect(() => {
     const savedRegion = Storage.load('region', null);
     const savedPending = Storage.load('pending', []);
+    const savedPreloadDate = Storage.load('lastPreloadDate', null);
     
     if (savedRegion) {
       setSelectedRegion(savedRegion);
       setView('categories');
     }
     if (savedPending) setPendingChanges(savedPending);
+    if (savedPreloadDate) setLastPreloadDate(savedPreloadDate);
     
     setIsHydrated(true);
   }, []);
@@ -454,16 +461,34 @@ export default function StockApp() {
     Storage.save('pending', pendingChanges);
   }, [pendingChanges]);
 
+  useEffect(() => {
+    if (lastPreloadDate) {
+      Storage.save('lastPreloadDate', lastPreloadDate);
+    }
+  }, [lastPreloadDate]);
+
   // ========== SYNC AUTOMATIQUE QUAND RETOUR RÉSEAU ==========
   useEffect(() => {
     // Si on était offline et qu'on revient online
-    if (isOnline && wasOffline.current && pendingChanges.length > 0) {
-      // Lancer la sync automatique
-      autoSync();
+    if (isOnline && wasOffline.current) {
+      // Effacer l'erreur
+      setError(null);
+      
+      // Recharger les données si nécessaire
+      if (view === 'tables' && selectedBase) {
+        loadTables(selectedBase);
+      } else if (view === 'items' && selectedBase && selectedTable) {
+        loadRecords(selectedBase, selectedTable);
+      }
+      
+      // Lancer la sync automatique si des changements en attente
+      if (pendingChanges.length > 0) {
+        autoSync();
+      }
     }
     // Mémoriser l'état précédent
     wasOffline.current = !isOnline;
-  }, [isOnline]);
+  }, [isOnline, view, selectedBase, selectedTable]);
 
   // Fonction de sync automatique
   const autoSync = async () => {
@@ -506,18 +531,143 @@ export default function StockApp() {
     }, 3000);
   };
 
+  // ========== PRÉCHARGEMENT DE TOUTES LES DONNÉES ==========
+  const preloadAllData = async (region) => {
+    if (!navigator.onLine) {
+      setError('Connexion internet requise pour le préchargement');
+      return false;
+    }
+
+    setIsPreloading(true);
+    setError(null);
+    
+    let totalItems = 0;
+    let loadedItems = 0;
+    let totalRecords = 0;
+
+    try {
+      // Étape 1: Compter le nombre total de tables
+      const allTables = [];
+      setPreloadProgress({ current: 0, total: region.bases.length, status: '📊 Analyse des catégories...' });
+      
+      for (const base of region.bases) {
+        try {
+          const tablesData = await airtableAPI.fetchTables(base.id);
+          Storage.save(`tables_${base.id}`, tablesData);
+          allTables.push(...tablesData.map(t => ({ ...t, baseId: base.id, baseName: base.name })));
+        } catch (err) {
+          console.log('Erreur chargement tables:', base.name, err);
+        }
+      }
+      
+      totalItems = allTables.length;
+      setPreloadProgress({ current: 0, total: totalItems, status: `📦 Chargement de ${totalItems} tables...` });
+
+      // Étape 2: Charger tous les records de chaque table
+      for (const table of allTables) {
+        try {
+          const statusMsg = `📥 ${table.baseName} › ${table.name}...`;
+          setPreloadProgress({ 
+            current: loadedItems, 
+            total: totalItems, 
+            status: statusMsg
+          });
+          // Mettre à jour la notification si en mode rafraîchissement
+          if (view !== 'preloading') {
+            setSyncNotification({ type: 'syncing', message: statusMsg });
+          }
+          
+          const recordsData = await airtableAPI.fetchRecords(table.baseId, table.id);
+          Storage.save(`records_${table.baseId}_${table.id}`, recordsData);
+          
+          // Ajouter au cache de recherche
+          setAllRecordsCache(prev => ({
+            ...prev,
+            [`${table.baseId}_${table.id}`]: { 
+              records: recordsData, 
+              base: { id: table.baseId, name: table.baseName }, 
+              table,
+              loadedAt: Date.now()
+            }
+          }));
+          
+          totalRecords += recordsData.length;
+          loadedItems++;
+          
+        } catch (err) {
+          console.log('Erreur chargement records:', table.name, err);
+          loadedItems++;
+        }
+        
+        // Petite pause pour ne pas surcharger l'API
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      // Terminé !
+      const now = new Date().toLocaleString('fr-FR');
+      setLastPreloadDate(now);
+      setPreloadProgress({ 
+        current: totalItems, 
+        total: totalItems, 
+        status: `✅ ${totalRecords} articles chargés !` 
+      });
+      
+      // Attendre un peu puis passer à l'écran suivant
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      setIsPreloading(false);
+      return true;
+
+    } catch (err) {
+      console.error('Erreur préchargement:', err);
+      setError('Erreur lors du préchargement');
+      setIsPreloading(false);
+      return false;
+    }
+  };
+
+  // Fonction pour rafraîchir les données manuellement
+  const refreshAllData = async () => {
+    if (selectedRegion && !isPreloading) {
+      // Montrer la progression via notification
+      setSyncNotification({ type: 'syncing', message: '📡 Mise à jour des données...' });
+      const success = await preloadAllData(selectedRegion);
+      if (success) {
+        setSyncNotification({ type: 'success', message: '✅ Données mises à jour !' });
+        setTimeout(() => setSyncNotification(null), 3000);
+      } else {
+        setSyncNotification({ type: 'error', message: '⚠️ Erreur de mise à jour' });
+        setTimeout(() => setSyncNotification(null), 3000);
+      }
+    }
+  };
+
   // Charger les tables d'une base (avec leurs champs)
   const loadTables = useCallback(async (base) => {
     setLoading(true);
     setError(null);
+    
+    // Si offline, charger depuis le cache directement
+    if (!navigator.onLine) {
+      const cached = Storage.load(`tables_${base.id}`, []);
+      setTables(cached);
+      if (cached.length === 0) {
+        setError('Mode hors ligne - Aucune donnée en cache pour cette catégorie');
+      }
+      setLoading(false);
+      return;
+    }
+    
     try {
       const tablesData = await airtableAPI.fetchTables(base.id);
       setTables(tablesData);
       Storage.save(`tables_${base.id}`, tablesData);
     } catch (err) {
-      setError('Erreur de chargement');
+      console.log('Erreur chargement tables:', err);
       const cached = Storage.load(`tables_${base.id}`, []);
       setTables(cached);
+      if (cached.length === 0) {
+        setError('Erreur de connexion - Aucune donnée en cache');
+      }
     }
     setLoading(false);
   }, []);
@@ -526,6 +676,21 @@ export default function StockApp() {
   const loadRecords = useCallback(async (base, table) => {
     setLoading(true);
     setError(null);
+    
+    // Si offline, charger depuis le cache directement
+    if (!navigator.onLine) {
+      const cached = Storage.load(`records_${base.id}_${table.id}`, []);
+      setRecords(cached);
+      if (table.fields) {
+        setTableFields(table.fields);
+      }
+      if (cached.length === 0) {
+        setError('Mode hors ligne - Aucune donnée en cache pour cette table');
+      }
+      setLoading(false);
+      return;
+    }
+    
     try {
       const recordsData = await airtableAPI.fetchRecords(base.id, table.id);
       setRecords(recordsData);
@@ -545,9 +710,12 @@ export default function StockApp() {
         }
       }));
     } catch (err) {
-      setError('Erreur de chargement');
+      console.log('Erreur chargement records:', err);
       const cached = Storage.load(`records_${base.id}_${table.id}`, []);
       setRecords(cached);
+      if (cached.length === 0) {
+        setError('Erreur de connexion - Aucune donnée en cache');
+      }
     }
     setLoading(false);
   }, []);
@@ -923,6 +1091,7 @@ export default function StockApp() {
 
   // Navigation
   const goBack = () => {
+    setError(null); // Effacer l'erreur
     if (view === 'detail') {
       setView('items');
       setSelectedRecord(null);
@@ -941,6 +1110,7 @@ export default function StockApp() {
   };
 
   const goHome = () => {
+    setError(null); // Effacer l'erreur
     setView('region');
     setSelectedRegion(null);
     setSelectedBase(null);
@@ -953,12 +1123,14 @@ export default function StockApp() {
   };
 
   const selectBase = (base) => {
+    setError(null); // Effacer l'erreur
     setSelectedBase(base);
     setView('tables');
     loadTables(base);
   };
 
   const selectTable = (table) => {
+    setError(null); // Effacer l'erreur
     setSelectedTable(table);
     setView('items');
     loadRecords(selectedBase, table);
@@ -967,6 +1139,26 @@ export default function StockApp() {
   const selectRecord = (record) => {
     setSelectedRecord(record);
     setView('detail');
+  };
+
+  // Fonction de sélection de région avec préchargement
+  const selectRegion = async (region) => {
+    setSelectedRegion(region);
+    
+    // Si online, lancer le préchargement
+    if (navigator.onLine) {
+      setView('preloading');
+      const success = await preloadAllData(region);
+      if (success) {
+        setView('categories');
+      } else {
+        // En cas d'erreur, aller quand même aux catégories avec le cache existant
+        setView('categories');
+      }
+    } else {
+      // Si offline, aller directement aux catégories (utilise le cache)
+      setView('categories');
+    }
   };
 
   // Écran de sélection de région (premier écran)
@@ -987,16 +1179,54 @@ export default function StockApp() {
                   ...styles.regionButton,
                   borderColor: region.color,
                 }}
-                onClick={() => {
-                  setSelectedRegion(region);
-                  setView('categories');
-                }}
+                onClick={() => selectRegion(region)}
               >
                 <span style={styles.regionFlag}>{region.flag}</span>
                 <span style={styles.regionName}>{region.name}</span>
                 <span style={styles.regionCount}>{region.bases.length} catégories</span>
               </button>
             ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Écran de préchargement
+  if (view === 'preloading' && isPreloading) {
+    const progressPercent = preloadProgress.total > 0 
+      ? Math.round((preloadProgress.current / preloadProgress.total) * 100)
+      : 0;
+    
+    return (
+      <div style={styles.container}>
+        <div style={styles.preloadScreen}>
+          <div style={styles.preloadContent}>
+            <div style={styles.preloadIcon}>📡</div>
+            <h2 style={styles.preloadTitle}>Préparation du mode hors ligne</h2>
+            <p style={styles.preloadSubtitle}>{preloadProgress.status}</p>
+            
+            {/* Barre de progression */}
+            <div style={styles.progressBarContainer}>
+              <div style={{
+                ...styles.progressBar,
+                width: `${progressPercent}%`,
+              }} />
+            </div>
+            <p style={styles.progressText}>
+              {preloadProgress.current} / {preloadProgress.total} tables
+            </p>
+            
+            {/* Bouton pour skip le préchargement */}
+            <button 
+              style={styles.skipButton}
+              onClick={() => {
+                setIsPreloading(false);
+                setView('categories');
+              }}
+            >
+              Passer ›
+            </button>
           </div>
         </div>
       </div>
@@ -1140,6 +1370,32 @@ export default function StockApp() {
           <span style={styles.syncSpinner}>⟳</span>
         )}
         {syncNotification.message}
+      </div>
+    );
+  };
+
+  // Fonction pour réessayer le chargement
+  const retryLoad = () => {
+    setError(null);
+    if (view === 'tables' && selectedBase) {
+      loadTables(selectedBase);
+    } else if (view === 'items' && selectedBase && selectedTable) {
+      loadRecords(selectedBase, selectedTable);
+    }
+  };
+
+  // Banner d'erreur avec bouton Réessayer
+  const ErrorBanner = () => {
+    if (!error) return null;
+    
+    return (
+      <div style={styles.errorBannerContainer}>
+        <div style={styles.errorBannerText}>
+          {isOnline ? '⚠️' : '📴'} {error}
+        </div>
+        <button style={styles.errorRetryButton} onClick={retryLoad}>
+          🔄 Réessayer
+        </button>
       </div>
     );
   };
@@ -1840,7 +2096,25 @@ export default function StockApp() {
         <Header title={`Stock ${selectedRegion.name}`} showBackButton={true} />
         <SyncNotification />
         <div style={styles.content}>
-          {error && <div style={styles.errorBanner}>{error}</div>}
+          <ErrorBanner />
+          
+          {/* Barre d'info sync */}
+          <div style={styles.syncInfoBar}>
+            <span style={styles.syncInfoText}>
+              {lastPreloadDate 
+                ? `📥 Dernière sync: ${lastPreloadDate}`
+                : '📥 Pas encore synchronisé'
+              }
+            </span>
+            <button 
+              style={styles.refreshButton}
+              onClick={refreshAllData}
+              disabled={isPreloading || !isOnline}
+            >
+              {isPreloading ? '⏳' : '🔄'} {isPreloading ? 'Sync...' : 'Rafraîchir'}
+            </button>
+          </div>
+          
           <div style={styles.categoryGrid}>
             {selectedRegion.bases.map((base) => (
               <button
@@ -1869,7 +2143,7 @@ export default function StockApp() {
         <SyncNotification />
         <div style={styles.content}>
           {loading && <div style={styles.loadingBar}>Chargement...</div>}
-          {error && <div style={styles.errorBanner}>{error}</div>}
+          <ErrorBanner />
           
           <div style={styles.tableList}>
             {tables.map((table) => (
@@ -1902,7 +2176,7 @@ export default function StockApp() {
         <SyncNotification />
         <div style={styles.content}>
           {loading && <div style={styles.loadingBar}>Chargement...</div>}
-          {error && <div style={styles.errorBanner}>{error}</div>}
+          <ErrorBanner />
           
           {/* Barre d'action pour ajouter un article */}
           <CrudActionBar />
@@ -2643,10 +2917,116 @@ const styles = {
     marginBottom: '16px',
     fontSize: '14px',
   },
+  errorBannerContainer: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '12px',
+    padding: '16px',
+    backgroundColor: '#fee2e2',
+    borderRadius: '12px',
+    marginBottom: '16px',
+  },
+  errorBannerText: {
+    color: '#dc2626',
+    fontSize: '14px',
+    textAlign: 'center',
+  },
+  errorRetryButton: {
+    padding: '10px 20px',
+    backgroundColor: '#dc2626',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+  },
   categoryGrid: {
     display: 'flex',
     flexDirection: 'column',
     gap: '12px',
+  },
+  // ========== STYLES PRÉCHARGEMENT ==========
+  preloadScreen: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '100%',
+    padding: '40px 20px',
+    background: 'linear-gradient(180deg, #fff 0%, #FCE4F2 100%)',
+  },
+  preloadContent: {
+    textAlign: 'center',
+    maxWidth: '300px',
+  },
+  preloadIcon: {
+    fontSize: '64px',
+    marginBottom: '20px',
+  },
+  preloadTitle: {
+    fontSize: '20px',
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: '8px',
+  },
+  preloadSubtitle: {
+    fontSize: '14px',
+    color: '#64748b',
+    marginBottom: '24px',
+  },
+  progressBarContainer: {
+    width: '100%',
+    height: '8px',
+    backgroundColor: '#e2e8f0',
+    borderRadius: '4px',
+    overflow: 'hidden',
+    marginBottom: '8px',
+  },
+  progressBar: {
+    height: '100%',
+    backgroundColor: '#E91E8C',
+    borderRadius: '4px',
+    transition: 'width 0.3s ease',
+  },
+  progressText: {
+    fontSize: '12px',
+    color: '#94a3b8',
+    marginBottom: '24px',
+  },
+  skipButton: {
+    padding: '10px 24px',
+    backgroundColor: 'transparent',
+    color: '#64748b',
+    border: '1px solid #e2e8f0',
+    borderRadius: '8px',
+    fontSize: '14px',
+    cursor: 'pointer',
+  },
+  // ========== STYLES BARRE DE SYNC ==========
+  syncInfoBar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '10px 14px',
+    backgroundColor: '#f1f5f9',
+    borderRadius: '10px',
+    marginBottom: '16px',
+  },
+  syncInfoText: {
+    fontSize: '12px',
+    color: '#64748b',
+  },
+  refreshButton: {
+    padding: '6px 12px',
+    backgroundColor: '#E91E8C',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '6px',
+    fontSize: '12px',
+    fontWeight: '600',
+    cursor: 'pointer',
   },
   categoryCard: {
     display: 'flex',
