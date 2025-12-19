@@ -612,8 +612,6 @@ export default function StockApp() {
         status: `✅ ${totalRecords} articles chargés !` 
       });
       
-      // Attendre un peu puis passer à l'écran suivant
-      await new Promise(resolve => setTimeout(resolve, 1500));
       setIsPreloading(false);
       return true;
 
@@ -896,7 +894,7 @@ export default function StockApp() {
     if (!newItemName.trim()) return;
     
     // Utiliser le bon champ de quantité selon la région
-    const qtyFieldName = selectedRegion?.id === 'guadeloupe' ? 'GUADELOUPE' : 'CORSICA';
+    const qtyFieldName = selectedRegion?.id === 'guadeloupe' ? 'GWADA' : 'CORSICA';
     
     const fields = {
       Name: newItemName.trim(),
@@ -960,7 +958,7 @@ export default function StockApp() {
     if (!newName.trim()) return;
     
     // Utiliser le bon champ de quantité selon la région
-    const qtyFieldName = selectedRegion?.id === 'guadeloupe' ? 'GUADELOUPE' : 'CORSICA';
+    const qtyFieldName = selectedRegion?.id === 'guadeloupe' ? 'GWADA' : 'CORSICA';
     
     const fields = { Name: newName.trim(), [qtyFieldName]: '0' };
     if (isOnline) {
@@ -1141,26 +1139,6 @@ export default function StockApp() {
     setView('detail');
   };
 
-  // Fonction de sélection de région avec préchargement
-  const selectRegion = async (region) => {
-    setSelectedRegion(region);
-    
-    // Si online, lancer le préchargement
-    if (navigator.onLine) {
-      setView('preloading');
-      const success = await preloadAllData(region);
-      if (success) {
-        setView('categories');
-      } else {
-        // En cas d'erreur, aller quand même aux catégories avec le cache existant
-        setView('categories');
-      }
-    } else {
-      // Si offline, aller directement aux catégories (utilise le cache)
-      setView('categories');
-    }
-  };
-
   // Écran de sélection de région (premier écran)
   if (!selectedRegion || view === 'region') {
     return (
@@ -1179,54 +1157,16 @@ export default function StockApp() {
                   ...styles.regionButton,
                   borderColor: region.color,
                 }}
-                onClick={() => selectRegion(region)}
+                onClick={() => {
+                  setSelectedRegion(region);
+                  setView('categories');
+                }}
               >
                 <span style={styles.regionFlag}>{region.flag}</span>
                 <span style={styles.regionName}>{region.name}</span>
                 <span style={styles.regionCount}>{region.bases.length} catégories</span>
               </button>
             ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Écran de préchargement
-  if (view === 'preloading' && isPreloading) {
-    const progressPercent = preloadProgress.total > 0 
-      ? Math.round((preloadProgress.current / preloadProgress.total) * 100)
-      : 0;
-    
-    return (
-      <div style={styles.container}>
-        <div style={styles.preloadScreen}>
-          <div style={styles.preloadContent}>
-            <div style={styles.preloadIcon}>📡</div>
-            <h2 style={styles.preloadTitle}>Préparation du mode hors ligne</h2>
-            <p style={styles.preloadSubtitle}>{preloadProgress.status}</p>
-            
-            {/* Barre de progression */}
-            <div style={styles.progressBarContainer}>
-              <div style={{
-                ...styles.progressBar,
-                width: `${progressPercent}%`,
-              }} />
-            </div>
-            <p style={styles.progressText}>
-              {preloadProgress.current} / {preloadProgress.total} tables
-            </p>
-            
-            {/* Bouton pour skip le préchargement */}
-            <button 
-              style={styles.skipButton}
-              onClick={() => {
-                setIsPreloading(false);
-                setView('categories');
-              }}
-            >
-              Passer ›
-            </button>
           </div>
         </div>
       </div>
@@ -1301,7 +1241,7 @@ export default function StockApp() {
             searchResults.map((result, idx) => {
               const photoField = findPhotoField(result.record.fields);
               const thumbUrl = photoField?.photos?.[0]?.thumbnails?.small?.url || photoField?.photos?.[0]?.url;
-              const qtyField = findQuantityField(result.record.fields);
+              const qtyField = findQuantityField(result.record.fields, result.table?.fields);
               
               return (
                 <button
@@ -1529,25 +1469,44 @@ export default function StockApp() {
 
   // ========== UTILITAIRES CHAMPS DYNAMIQUES ==========
   
-  // Trouver le champ de quantité (CORSICA, GUADELOUPE, Quantité, Stock, Qty...)
-  const findQuantityField = (fields) => {
+  // Trouver le champ de quantité (CORSICA, GWADA, GUADELOUPE, Quantité, Stock, Qty...)
+  // Si aucun nom connu trouvé, cherche le premier champ numérique
+  const findQuantityField = (fields, tableFieldsDef = []) => {
     if (!fields) return null;
     
-    const qtyFieldNames = ['CORSICA', 'GUADELOUPE', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
+    const qtyFieldNames = ['CORSICA', 'GWADA', 'GUADELOUPE', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
     
-    // Chercher d'abord une correspondance exacte
+    // 1. Chercher d'abord une correspondance exacte
     for (const name of qtyFieldNames) {
       if (fields[name] !== undefined) {
         return { name, value: parseInt(fields[name]) || 0 };
       }
     }
     
-    // Sinon chercher case-insensitive
+    // 2. Sinon chercher case-insensitive
     const fieldKeys = Object.keys(fields);
     for (const name of qtyFieldNames) {
       const found = fieldKeys.find(k => k.toLowerCase() === name.toLowerCase());
       if (found && fields[found] !== undefined) {
         return { name: found, value: parseInt(fields[found]) || 0 };
+      }
+    }
+    
+    // 3. Fallback: chercher le premier champ numérique dans la définition de la table
+    if (tableFieldsDef && tableFieldsDef.length > 0) {
+      const numericField = tableFieldsDef.find(f => f.type === 'number');
+      if (numericField && fields[numericField.name] !== undefined) {
+        return { name: numericField.name, value: parseInt(fields[numericField.name]) || 0 };
+      }
+    }
+    
+    // 4. Dernier recours: chercher un champ qui ressemble à un nombre dans les données
+    for (const key of fieldKeys) {
+      const value = fields[key];
+      // Exclure les champs systèmes et les champs connus non-quantité
+      if (['Name', 'Titre', 'Commentaire', 'Date', 'Enregistré par', 'Rangement', 'État'].includes(key)) continue;
+      if (typeof value === 'number' || (typeof value === 'string' && /^\d+$/.test(value))) {
+        return { name: key, value: parseInt(value) || 0 };
       }
     }
     
@@ -1667,7 +1626,7 @@ export default function StockApp() {
   // ========== COMPOSANT CHAMP DYNAMIQUE ==========
   // Champs en LECTURE SEULE uniquement (Titre pour catégorisation, Date mise à jour auto)
   const readOnlyFields = ['Titre', 'Catégorie', 'Categorie', 'Type', 'Groupe', 'Group', 'Date'];
-  const quantityFieldNames = ['CORSICA', 'GUADELOUPE', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
+  const quantityFieldNames = ['CORSICA', 'GWADA', 'GUADELOUPE', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
   
   const DynamicField = ({ fieldName, fieldDef, value, recordId }) => {
     
@@ -2098,22 +2057,30 @@ export default function StockApp() {
         <div style={styles.content}>
           <ErrorBanner />
           
-          {/* Barre d'info sync */}
-          <div style={styles.syncInfoBar}>
-            <span style={styles.syncInfoText}>
-              {lastPreloadDate 
-                ? `📥 Dernière sync: ${lastPreloadDate}`
-                : '📥 Pas encore synchronisé'
+          {/* Bouton de synchronisation offline */}
+          <button 
+            style={{
+              ...styles.offlineSyncButton,
+              opacity: isPreloading || !isOnline ? 0.7 : 1,
+            }}
+            onClick={refreshAllData}
+            disabled={isPreloading || !isOnline}
+          >
+            <span style={styles.offlineSyncIcon}>
+              {isPreloading ? '⏳' : '📥'}
+            </span>
+            <span style={styles.offlineSyncText}>
+              {isPreloading 
+                ? `Sync en cours... ${preloadProgress.current}/${preloadProgress.total}`
+                : 'Synchroniser pour le mode hors ligne'
               }
             </span>
-            <button 
-              style={styles.refreshButton}
-              onClick={refreshAllData}
-              disabled={isPreloading || !isOnline}
-            >
-              {isPreloading ? '⏳' : '🔄'} {isPreloading ? 'Sync...' : 'Rafraîchir'}
-            </button>
-          </div>
+            {lastPreloadDate && !isPreloading && (
+              <span style={styles.offlineSyncDate}>
+                Dernière: {lastPreloadDate}
+              </span>
+            )}
+          </button>
           
           <div style={styles.categoryGrid}>
             {selectedRegion.bases.map((base) => (
@@ -2192,7 +2159,7 @@ export default function StockApp() {
                     <span style={styles.groupCount}>{groupRecords.length}</span>
                   </div>
                   {groupRecords.map((record) => {
-                    const qtyField = findQuantityField(record.fields);
+                    const qtyField = findQuantityField(record.fields, selectedTable?.fields);
                     const qty = qtyField?.value || 0;
                     const photoField = findPhotoField(record.fields);
                     const thumbUrl = photoField?.photos?.[0]?.thumbnails?.small?.url || photoField?.photos?.[0]?.url;
@@ -2244,7 +2211,7 @@ export default function StockApp() {
             // SANS regroupement (liste simple)
             <div style={styles.itemList}>
               {records.map((record) => {
-                const qtyField = findQuantityField(record.fields);
+                const qtyField = findQuantityField(record.fields, selectedTable?.fields);
                 const qty = qtyField?.value || 0;
                 const photoField = findPhotoField(record.fields);
                 const thumbUrl = photoField?.photos?.[0]?.thumbnails?.small?.url || photoField?.photos?.[0]?.url;
@@ -2399,8 +2366,8 @@ export default function StockApp() {
     const photoField = findPhotoField(fields);
     const photos = photoField?.photos || [];
     
-    // Récupérer la quantité dynamiquement
-    const qtyField = findQuantityField(fields);
+    // Récupérer la quantité dynamiquement (avec fallback sur premier champ numérique)
+    const qtyField = findQuantityField(fields, tableFields);
     
     // Trouver la définition des champs de la table
     const getFieldDef = (fieldName) => {
@@ -3004,29 +2971,31 @@ const styles = {
     fontSize: '14px',
     cursor: 'pointer',
   },
-  // ========== STYLES BARRE DE SYNC ==========
-  syncInfoBar: {
+  // ========== STYLES BOUTON SYNC OFFLINE ==========
+  offlineSyncButton: {
     display: 'flex',
+    flexDirection: 'column',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '10px 14px',
-    backgroundColor: '#f1f5f9',
-    borderRadius: '10px',
-    marginBottom: '16px',
-  },
-  syncInfoText: {
-    fontSize: '12px',
-    color: '#64748b',
-  },
-  refreshButton: {
-    padding: '6px 12px',
-    backgroundColor: '#E91E8C',
-    color: '#fff',
+    gap: '4px',
+    width: '100%',
+    padding: '14px 16px',
+    backgroundColor: '#00CED1',
     border: 'none',
-    borderRadius: '6px',
-    fontSize: '12px',
-    fontWeight: '600',
+    borderRadius: '12px',
+    marginBottom: '16px',
     cursor: 'pointer',
+  },
+  offlineSyncIcon: {
+    fontSize: '20px',
+  },
+  offlineSyncText: {
+    fontSize: '14px',
+    fontWeight: '600',
+    color: '#fff',
+  },
+  offlineSyncDate: {
+    fontSize: '11px',
+    color: 'rgba(255,255,255,0.8)',
   },
   categoryCard: {
     display: 'flex',
