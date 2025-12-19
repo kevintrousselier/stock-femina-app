@@ -1389,10 +1389,7 @@ export default function StockApp() {
   };
 
   // ========== COMPOSANT CHAMP DYNAMIQUE ==========
-  // Utilisateurs prédéfinis pour le champ "Enregistré par"
-  const USERS = ['Michel', 'Kevin', 'Alisson', 'Alex'];
-  
-  // Champs en LECTURE SEULE uniquement
+  // Champs en LECTURE SEULE uniquement (Titre pour catégorisation, Date mise à jour auto)
   const readOnlyFields = ['Titre', 'Catégorie', 'Categorie', 'Type', 'Groupe', 'Group', 'Date'];
   const quantityFieldNames = ['CORISCA', 'Quantité', 'Quantite', 'Stock', 'Qty', 'Nombre', 'Count'];
   
@@ -1443,27 +1440,13 @@ export default function StockApp() {
       );
     }
 
-    // ===== CHAMP "ENREGISTRÉ PAR" (boutons utilisateurs) =====
+    // ===== CHAMP "ENREGISTRÉ PAR" (lecture seule - Collaborator Airtable) =====
     if (fieldName === 'Enregistré par') {
-      const displayValue = value?.name || value || '';
+      const displayValue = value?.name || value || '-';
       return (
         <div style={styles.fieldSection}>
           <span style={styles.sectionLabel}>👤 {fieldName}</span>
-          <div style={styles.userSelectButtons}>
-            {USERS.map((user) => (
-              <button
-                key={user}
-                style={{
-                  ...styles.userSelectBtn,
-                  backgroundColor: displayValue === user ? '#E91E8C' : '#f1f5f9',
-                  color: displayValue === user ? '#fff' : '#64748b',
-                }}
-                onClick={() => updateRecord(recordId, fieldName, user)}
-              >
-                {user}
-              </button>
-            ))}
-          </div>
+          <div style={styles.readOnlyField}>{displayValue}</div>
         </div>
       );
     }
@@ -2132,8 +2115,14 @@ export default function StockApp() {
       return tableFields.find(f => f.name === fieldName) || null;
     };
 
-    // Liste des champs à afficher (exclure les systèmes et les photos)
-    const displayFields = Object.keys(fields).filter(key => 
+    // Liste des champs à afficher
+    // Utiliser tableFields (structure de la table) pour afficher TOUS les champs, même vides
+    // Si tableFields n'est pas disponible, fallback sur les champs du record
+    const allFieldNames = tableFields.length > 0 
+      ? tableFields.map(f => f.name)
+      : Object.keys(fields);
+    
+    const displayFields = allFieldNames.filter(key => 
       !excludedFields.includes(key) && 
       key !== (qtyField?.name) && // Exclure le champ quantité (affiché séparément)
       !key.startsWith('photo_') // Exclure les champs checklist photo
