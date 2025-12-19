@@ -329,6 +329,7 @@ const PhotoUtils = {
 // Stockage local pour le mode offline
 const Storage = {
   save: (key, data) => {
+    if (typeof window === 'undefined') return;
     try {
       localStorage.setItem(`stock_${key}`, JSON.stringify(data));
     } catch (e) {
@@ -336,6 +337,7 @@ const Storage = {
     }
   },
   load: (key, defaultValue) => {
+    if (typeof window === 'undefined') return defaultValue;
     try {
       const data = localStorage.getItem(`stock_${key}`);
       return data ? JSON.parse(data) : defaultValue;
@@ -347,8 +349,10 @@ const Storage = {
 
 // Hook online/offline
 const useOnlineStatus = () => {
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isOnline, setIsOnline] = useState(true); // Défaut à true
   useEffect(() => {
+    // Côté client seulement
+    setIsOnline(navigator.onLine);
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
@@ -364,7 +368,7 @@ const useOnlineStatus = () => {
 // Composant principal
 export default function StockApp() {
   const [view, setView] = useState('user'); // Commence par la sélection d'utilisateur
-  const [selectedRegion, setSelectedRegion] = useState(() => Storage.load('region', null));
+  const [selectedRegion, setSelectedRegion] = useState(null);
   const [selectedBase, setSelectedBase] = useState(null);
   const [selectedTable, setSelectedTable] = useState(null);
   const [selectedRecord, setSelectedRecord] = useState(null);
@@ -372,8 +376,8 @@ export default function StockApp() {
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [currentUser, setCurrentUser] = useState(() => Storage.load('user', null));
-  const [pendingChanges, setPendingChanges] = useState(() => Storage.load('pending', []));
+  const [currentUser, setCurrentUser] = useState(null);
+  const [pendingChanges, setPendingChanges] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -383,6 +387,7 @@ export default function StockApp() {
   const [compressedPhoto, setCompressedPhoto] = useState(null);
   const [photoUploading, setPhotoUploading] = useState(false);
   const [newItemName, setNewItemName] = useState('');
+  const [isHydrated, setIsHydrated] = useState(false);
   
   // States pour CRUD articles
   const [showAddModal, setShowAddModal] = useState(false);
@@ -400,13 +405,24 @@ export default function StockApp() {
   const fileInputRef = useRef(null);
   const wasOffline = useRef(false); // Pour détecter le passage offline → online
 
-  // Démarrer sur la bonne vue si user et région déjà sélectionnés
+  // Charger les données du localStorage au montage (côté client uniquement)
   useEffect(() => {
-    if (currentUser && selectedRegion) {
+    const savedRegion = Storage.load('region', null);
+    const savedUser = Storage.load('user', null);
+    const savedPending = Storage.load('pending', []);
+    
+    if (savedRegion) setSelectedRegion(savedRegion);
+    if (savedUser) setCurrentUser(savedUser);
+    if (savedPending) setPendingChanges(savedPending);
+    
+    // Déterminer la vue initiale
+    if (savedUser && savedRegion) {
       setView('categories');
-    } else if (currentUser && !selectedRegion) {
+    } else if (savedUser) {
       setView('region');
     }
+    
+    setIsHydrated(true);
   }, []);
 
   // Sauvegarder les données localement
